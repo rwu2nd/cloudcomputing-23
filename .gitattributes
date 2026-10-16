@@ -1,0 +1,7 @@
+# Keep shell scripts and Dockerfiles on LF line endings, even on Windows.
+# (CRLF line endings break `#!/bin/sh` scripts inside Linux containers.)
+* text=auto
+*.sh text eol=lf
+Dockerfile* text eol=lf
+*.Dockerfile text eol=lf
+Makefile text eol=lf
