@@ -1,0 +1,94 @@
+# Smart Locker System - local development stack (frontend + backend + PostgreSQL)
+#
+# This file lives in the repository root on purpose: Docker Compose then reads
+# the `.env` file next to it automatically. The Dockerfiles are in ./docker.
+#
+#   cp .env.example .env     # then set POSTGRES_PASSWORD
+#   docker compose up --build
+#
+# Requires Docker Compose v2.17 or newer (uses `depends_on.restart`).
+
+name: smart-locker
+
+# Database settings shared by the postgres and backend services.
+# There are deliberately NO default credentials: values come from .env.
+x-db-settings: &db-settings
+  POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env (copy .env.example to .env)}
+  POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env (copy .env.example to .env)}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (copy .env.example to .env)}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      <<: *db-settings
+    ports:
+      # Bound to localhost only, so teammates can use psql / a DB GUI without
+      # exposing the database to the rest of the network.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      # Named volume = data survives `docker compose down` (use `down -v` to wipe it).
+      - postgres_data:/var/lib/postgresql/data
+      # Optional init scripts (*.sql, *.sh). They run ONCE, when the volume is empty.
+      # The schema belongs to the database teammate: see database/README.md.
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    # Same tag the Kubernetes manifests use, so one build serves both.
+    image: smart-locker-backend:local
+    environment:
+      <<: *db-settings
+      APP_ENV: ${APP_ENV:-development}
+      # Service name on the Compose network (the Kubernetes Service is also called "postgres").
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    ports:
+      # BIND_ADDRESS=127.0.0.1 (default): this computer only.
+      # BIND_ADDRESS=0.0.0.0: other devices on your Wi-Fi (e.g. a phone) can connect too.
+      - "${BIND_ADDRESS:-127.0.0.1}:${BACKEND_HOST_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # python:slim has no curl, so use Python itself. Hits the liveness endpoint.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    image: smart-locker-frontend:local
+    environment:
+      # nginx forwards /api/* to this URL (no trailing slash).
+      BACKEND_URL: http://backend:8000
+    ports:
+      # Same BIND_ADDRESS rule as the backend. The database port above is deliberately
+      # NOT affected: PostgreSQL is never opened to the network.
+      - "${BIND_ADDRESS:-127.0.0.1}:${FRONTEND_HOST_PORT:-3000}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+        # If the backend container is recreated (new IP), restart nginx so it
+        # picks up the new address instead of returning 502 errors.
+        restart: true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:

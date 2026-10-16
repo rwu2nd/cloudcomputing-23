@@ -1,0 +1,79 @@
+# FastAPI backend: two replicas, with readiness and liveness probes.
+# The probe URLs are implemented (as placeholders) in backend/app/health.py.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: smart-locker
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: backend
+          # Built locally (docker compose build) and loaded into the cluster:
+          # see "Kubernetes deployment" in the README. Never pulled from a registry.
+          image: smart-locker-backend:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          # Every key in the ConfigMap and the Secret becomes an environment
+          # variable (POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, ...).
+          envFrom:
+            - configMapRef:
+                name: locker-config
+            - secretRef:
+                name: locker-db-secret
+          # Gives the app up to ~60s to start before the other probes begin.
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          # "Should this pod receive traffic?" - fails (pod removed from the
+          # Service, NOT restarted) while the database is unreachable.
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # "Is the process alive?" - must not depend on the database.
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL

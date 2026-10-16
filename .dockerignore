@@ -1,0 +1,20 @@
+# Shared by the frontend and backend image builds (build context = repo root).
+.git
+.gitignore
+.gitattributes
+.env
+.env.*
+
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+**/.venv
+**/venv
+**/.pytest_cache
+
+# Not needed inside any image
+kubernetes
+database
+README.md
+Makefile

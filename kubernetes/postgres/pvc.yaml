@@ -1,0 +1,17 @@
+# Persistent storage for PostgreSQL. No storageClassName is set, so the cluster's
+# default StorageClass is used (minikube, kind and Docker Desktop all provide one).
+# Data survives pod restarts and re-applying the manifests. It is DELETED if you
+# delete this claim, the namespace, or run `kubectl delete -k kubernetes/`.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: smart-locker
+  labels:
+    app: postgres
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

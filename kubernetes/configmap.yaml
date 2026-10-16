@@ -1,0 +1,20 @@
+# Non-secret configuration. Passwords and usernames are NOT here: they live in
+# the Secret "locker-db-secret" (see secret.yaml.example / create-secret.sh).
+#
+# Backend teammate: any key you add here becomes an environment variable in the
+# backend pods (the Deployment uses `envFrom`). Restart the pods to pick it up:
+#   kubectl -n smart-locker rollout restart deployment/backend
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: locker-config
+  namespace: smart-locker
+data:
+  APP_ENV: development
+  # Kubernetes Service names (same names as in docker-compose.yml)
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  # Keep in sync with POSTGRES_DB in your .env
+  POSTGRES_DB: locker_db
+  # Used by the frontend's nginx to forward /api/* (no trailing slash)
+  BACKEND_URL: http://backend:8000

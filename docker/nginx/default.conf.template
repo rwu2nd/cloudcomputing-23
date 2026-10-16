@@ -1,0 +1,33 @@
+# nginx config template for the frontend container.
+# ${BACKEND_URL} is filled in from the environment when the container starts
+# (e.g. http://backend:8000). Do not add a trailing slash to BACKEND_URL.
+
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Health endpoint for Docker / Kubernetes probes (served by nginx itself).
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # Everything under /api/ is forwarded unchanged to the backend,
+    # so a backend route @app.get("/api/lockers") is reachable at /api/lockers.
+    location /api/ {
+        proxy_pass ${BACKEND_URL};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Single-page app: unknown paths fall back to index.html (client-side routing).
+    location / {
+        try_files $uri /index.html;
+    }
+}

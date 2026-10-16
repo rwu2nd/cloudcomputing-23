@@ -1,0 +1,22 @@
+# Secrets and local configuration (never commit these)
+.env
+.env.*
+!.env.example
+kubernetes/secret.yaml
+
+# Node / frontend
+node_modules/
+frontend/dist/
+
+# Python / backend
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Editors and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

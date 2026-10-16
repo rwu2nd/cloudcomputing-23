@@ -1,0 +1,16 @@
+# Apply everything (in a safe order) with:  kubectl apply -k kubernetes/
+# The Secret is NOT listed here on purpose: create it first with
+# kubernetes/create-secret.sh (see README, "Kubernetes deployment").
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - postgres/pvc.yaml
+  - postgres/deployment.yaml
+  - postgres/service.yaml
+  - backend/deployment.yaml
+  - backend/service.yaml
+  - frontend/deployment.yaml
+  - frontend/service.yaml

@@ -1,0 +1,16 @@
+# Internal address of the backend: http://backend:8000 (load-balanced over the 2 replicas).
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: smart-locker
+  labels:
+    app: backend
+spec:
+  type: ClusterIP
+  selector:
+    app: backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

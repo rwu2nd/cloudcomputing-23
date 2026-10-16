@@ -1,0 +1,4 @@
+# Pinned so every teammate (and the Docker image) gets identical versions.
+# Add your own libraries below, e.g. sqlalchemy, psycopg[binary], alembic.
+fastapi==0.143.2
+uvicorn[standard]==0.54.0
