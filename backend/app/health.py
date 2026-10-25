@@ -27,13 +27,30 @@ def check_database_reachable(timeout: float = 2.0) -> bool:
     TODO (backend teammate): replace with a real check once the database layer
     exists, e.g. run `SELECT 1` through your connection pool.
     """
+    # settings = get_settings()
+    # try:
+    #     with socket.create_connection(
+    #         (settings.postgres_host, settings.postgres_port), timeout=timeout
+    #     ):
+    #         return True
+    # except OSError:
+    #     return False
+
     settings = get_settings()
     try:
-        with socket.create_connection(
-            (settings.postgres_host, settings.postgres_port), timeout=timeout
-        ):
-            return True
-    except OSError:
+        with psycopg2.connect(
+            host=settings.postgres_host,
+            port=settings.postgres_port,
+            dbname=settings.postgres_db,
+            user=settings.postgres_user,
+            password=settings.postgres_password,
+            connect_timeout=max(1, int(timeout)),
+            application_name="smart-locker-health",
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                return cur.fetchone()[0] == 1
+    except (psycopg2.Error, OSError, AttributeError):
         return False
 
 
