@@ -12,13 +12,13 @@ Browser --> frontend (nginx :80) --/api/*--> backend (FastAPI :8000) --> postgre
 
 ## 1. Status at a glance
 
-| Area | Provided by the scaffold (placeholder) | Your team implements |
-|---|---|---|
-| Frontend | Vite + React project, one placeholder page that calls `/api/ping` and shows whether the backend and database are reachable. Dockerfile, nginx serving + `/api` proxy. | The real UI (replace `frontend/src/`). |
-| Backend | FastAPI app with `/health/live`, `/health/ready` (placeholder TCP check of the database) and a placeholder `/api/ping`. Settings read from environment variables. Dockerfile. | Real readiness check, all API endpoints, locker logic, database access layer. Delete `/api/ping` when no longer needed. |
-| Database | PostgreSQL 16 container, persistent volume, credentials from environment, health check. | The schema (tables, migrations, seed data). **Nothing is created for you.** |
-| Docker Compose | Runs all three services, waits for healthy dependencies. | - |
-| Kubernetes | Namespace, ConfigMap, Secret template + script, PostgreSQL Deployment with a PVC, backend Deployment (**2 replicas**, readiness + liveness probes), frontend Deployment, Services. | Decide how the schema is created in Kubernetes (see `database/README.md`). |
+| Area           | Provided by the scaffold (placeholder)                                                                                                                                             | Your team implements                                                                                                    |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Frontend       | Vite + React project, one placeholder page that calls `/api/ping` and shows whether the backend and database are reachable. Dockerfile, nginx serving + `/api` proxy.              | The real UI (replace `frontend/src/`).                                                                                  |
+| Backend        | FastAPI app with `/health/live`, `/health/ready` (placeholder TCP check of the database) and a placeholder `/api/ping`. Settings read from environment variables. Dockerfile.      | Real readiness check, all API endpoints, locker logic, database access layer. Delete `/api/ping` when no longer needed. |
+| Database       | PostgreSQL 16 container, persistent volume, credentials from environment, health check.                                                                                            | The schema (tables, migrations, seed data). **Nothing is created for you.**                                             |
+| Docker Compose | Runs all three services, waits for healthy dependencies.                                                                                                                           | -                                                                                                                       |
+| Kubernetes     | Namespace, ConfigMap, Secret template + script, PostgreSQL Deployment with a PVC, backend Deployment (**2 replicas**, readiness + liveness probes), frontend Deployment, Services. | Decide how the schema is created in Kubernetes (see `database/README.md`).                                              |
 
 Not everything has been run end to end yet. **Read [Test status](#10-test-status-and-first-run-checklist) before you start.**
 
@@ -58,14 +58,14 @@ finds your `.env` file automatically.
 
 ## 3. Required software
 
-| Software | Needed for | Notes |
-|---|---|---|
-| Docker Desktop (Windows/macOS) or Docker Engine + Compose plugin (Linux) | Everything | Compose **v2.17 or newer** (`docker compose version`). Give Docker at least 4 GB RAM. |
-| `kubectl` | Kubernetes only | Includes kustomize (`kubectl apply -k`). |
-| A local cluster: Docker Desktop's Kubernetes, **minikube**, or **kind** | Kubernetes only | Pick one. |
-| Git Bash or WSL | Windows users running `sh` scripts / `make` | Only needed for `create-secret.sh` and the Makefile. |
-| `make` | Optional | Plain commands are always given. |
-| Node.js 22 and Python 3.12 | Only if you run the frontend/backend outside Docker | Section 6. |
+| Software                                                                 | Needed for                                          | Notes                                                                                 |
+| ------------------------------------------------------------------------ | --------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Docker Desktop (Windows/macOS) or Docker Engine + Compose plugin (Linux) | Everything                                          | Compose **v2.17 or newer** (`docker compose version`). Give Docker at least 4 GB RAM. |
+| `kubectl`                                                                | Kubernetes only                                     | Includes kustomize (`kubectl apply -k`).                                              |
+| A local cluster: Docker Desktop's Kubernetes, **minikube**, or **kind**  | Kubernetes only                                     | Pick one.                                                                             |
+| Git Bash or WSL                                                          | Windows users running `sh` scripts / `make`         | Only needed for `create-secret.sh` and the Makefile.                                  |
+| `make`                                                                   | Optional                                            | Plain commands are always given.                                                      |
+| Node.js 22 and Python 3.12                                               | Only if you run the frontend/backend outside Docker | Section 6.                                                                            |
 
 ## 4. Quick start (Docker Compose)
 
@@ -77,16 +77,17 @@ cp .env.example .env          # Windows cmd: copy .env.example .env
 
 # 2. Build and start everything
 docker compose up --build
+# if this does not work, try: docker-compose up --build
 ```
 
 First start takes a few minutes (it downloads base images). When it is up:
 
-| What | URL |
-|---|---|
-| Placeholder web page (should show "Backend reachable" and "Database reachable") | http://localhost:3000 |
-| Backend liveness / readiness | http://localhost:8000/health/live , http://localhost:8000/health/ready |
-| Backend interactive API docs (FastAPI) | http://localhost:8000/docs |
-| PostgreSQL from your machine | `localhost:5432` (user, password and database name from `.env`) |
+| What                                                                            | URL                                                                    |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Placeholder web page (should show "Backend reachable" and "Database reachable") | http://localhost:3000                                                  |
+| Backend liveness / readiness                                                    | http://localhost:8000/health/live , http://localhost:8000/health/ready |
+| Backend interactive API docs (FastAPI)                                          | http://localhost:8000/docs                                             |
+| PostgreSQL from your machine                                                    | `localhost:5432` (user, password and database name from `.env`)        |
 
 Everyday commands:
 
@@ -121,23 +122,24 @@ a phone hotspot. On Kubernetes add `--address 0.0.0.0` to the `kubectl port-forw
 Nothing is hard-coded. Credentials exist only in your local `.env` (Compose) or in a Kubernetes
 Secret created from it. Compose refuses to start while `POSTGRES_PASSWORD` is empty.
 
-| Variable | Used by | Compose gets it from | Kubernetes gets it from |
-|---|---|---|---|
-| `POSTGRES_DB` | postgres, backend | `.env` | ConfigMap `locker-config` |
-| `POSTGRES_USER` | postgres, backend | `.env` | Secret `locker-db-secret` |
-| `POSTGRES_PASSWORD` | postgres, backend | `.env` | Secret `locker-db-secret` |
-| `POSTGRES_HOST` = `postgres` | backend | `docker-compose.yml` | ConfigMap |
-| `POSTGRES_PORT` = `5432` | backend | `docker-compose.yml` | ConfigMap |
-| `APP_ENV` | backend | `.env` (default `development`) | ConfigMap |
-| `BIND_ADDRESS` (`127.0.0.1` or `0.0.0.0`) | Compose published ports of frontend and backend | `.env` | - |
-| `BACKEND_URL` = `http://backend:8000` | frontend's nginx | `docker-compose.yml` | ConfigMap |
-| `VITE_API_BASE_URL` (default `/api`) | frontend build | Dockerfile build argument | - |
+| Variable                                  | Used by                                         | Compose gets it from           | Kubernetes gets it from   |
+| ----------------------------------------- | ----------------------------------------------- | ------------------------------ | ------------------------- |
+| `POSTGRES_DB`                             | postgres, backend                               | `.env`                         | ConfigMap `locker-config` |
+| `POSTGRES_USER`                           | postgres, backend                               | `.env`                         | Secret `locker-db-secret` |
+| `POSTGRES_PASSWORD`                       | postgres, backend                               | `.env`                         | Secret `locker-db-secret` |
+| `POSTGRES_HOST` = `postgres`              | backend                                         | `docker-compose.yml`           | ConfigMap                 |
+| `POSTGRES_PORT` = `5432`                  | backend                                         | `docker-compose.yml`           | ConfigMap                 |
+| `APP_ENV`                                 | backend                                         | `.env` (default `development`) | ConfigMap                 |
+| `BIND_ADDRESS` (`127.0.0.1` or `0.0.0.0`) | Compose published ports of frontend and backend | `.env`                         | -                         |
+| `BACKEND_URL` = `http://backend:8000`     | frontend's nginx                                | `docker-compose.yml`           | ConfigMap                 |
+| `VITE_API_BASE_URL` (default `/api`)      | frontend build                                  | Dockerfile build argument      | -                         |
 
 Service names are the same in Compose and Kubernetes (`postgres`, `backend`, `frontend`), so the
 same hostnames work in both. Host ports (`FRONTEND_HOST_PORT`, `BACKEND_HOST_PORT`,
 `POSTGRES_HOST_PORT`) can be changed in `.env` if something on your laptop already uses them.
 
 **Adding a new setting for the backend**
+
 - Not secret: add it under `backend.environment` in `docker-compose.yml` and as a key in `kubernetes/configmap.yaml`. The Kubernetes backend loads every ConfigMap key automatically (restart with `kubectl -n smart-locker rollout restart deployment/backend`).
 - Secret: follow how `POSTGRES_PASSWORD` is handled: blank entry in `.env.example`, `${VAR:?message}` in `docker-compose.yml`, key in `kubernetes/secret.yaml.example`, and extend the key list in `kubernetes/create-secret.sh`. The Kubernetes backend loads every Secret key automatically.
 
@@ -146,6 +148,7 @@ same hostnames work in both. Host ports (`FRONTEND_HOST_PORT`, `BACKEND_HOST_POR
 Fast iteration without rebuilding images: run the database in Docker and your own part natively.
 
 **Backend** (Python 3.12):
+
 ```bash
 docker compose up -d postgres
 cd backend
@@ -154,14 +157,17 @@ pip install -r requirements.txt
 set -a; . ../.env; set +a                              # load .env into this shell (macOS/Linux/Git Bash)
 uvicorn app.main:app --reload --port 8000
 ```
+
 (`POSTGRES_HOST` defaults to `localhost` and `POSTGRES_PORT` to `5432`. If you changed `POSTGRES_HOST_PORT`, also `export POSTGRES_PORT=<that value>`.)
 
 **Frontend** (Node 22):
+
 ```bash
 cd frontend
 npm install
 npm run dev          # http://localhost:5173 ; /api/* is proxied to http://localhost:8000
 ```
+
 Use a different backend with `VITE_DEV_PROXY_TARGET=http://host:port npm run dev`.
 
 ## 7. Kubernetes deployment
@@ -170,6 +176,7 @@ Written for a single-laptop cluster. The images are built locally and **loaded i
 they are never pulled from a registry (`imagePullPolicy: IfNotPresent`, tag `:local`).
 
 **1. Start a cluster** (one of):
+
 ```bash
 # Docker Desktop: Settings -> Kubernetes -> Enable Kubernetes
 minikube start
@@ -178,11 +185,13 @@ kubectl get nodes        # should list one Ready node
 ```
 
 **2. Build the images** (Compose builds them with the exact tags the manifests use):
+
 ```bash
 docker compose build
 ```
 
 **3. Make the images available to the cluster:**
+
 ```bash
 # minikube
 minikube image load smart-locker-backend:local
@@ -195,9 +204,11 @@ kind load docker-image smart-locker-frontend:local --name smart-locker
 # Docker Desktop Kubernetes: usually nothing to do (it sees your local images).
 # If pods later show ErrImagePull / ErrImageNeverPull, check which cluster type you enabled.
 ```
+
 The `postgres:16-alpine` image is pulled by the cluster itself.
 
 **4. Create the database Secret from your `.env`** (no credentials ever go into a manifest):
+
 ```bash
 sh kubernetes/create-secret.sh
 # Windows without Git Bash/WSL, do it by hand instead:
@@ -206,20 +217,24 @@ sh kubernetes/create-secret.sh
 ```
 
 **5. Apply the manifests:**
+
 ```bash
 kubectl apply -k kubernetes/
 kubectl -n smart-locker get pods -w
 ```
+
 Expected when ready: `postgres` 1/1, `backend` **two** pods 1/1, `frontend` 1/1.
 (Use `kubectl apply -k`, not `kubectl apply -f kubernetes/`: kustomize applies the namespace first.)
 
 **6. Open the app:**
+
 ```bash
 kubectl -n smart-locker port-forward svc/frontend 8080:80     # then http://localhost:8080
 kubectl -n smart-locker port-forward svc/backend 8000:8000    # then http://localhost:8000/health/ready
 ```
 
 **Useful checks**
+
 ```bash
 kubectl -n smart-locker get deploy,pods,svc,pvc
 kubectl -n smart-locker describe pod <pod-name>
@@ -241,12 +256,14 @@ the Secret**. Then `minikube delete` / `kind delete cluster --name smart-locker`
 ## 8. How teammates plug in their code
 
 ### Frontend teammate (`frontend/`)
+
 1. Replace `src/` (and `index.html` if needed). Keep `npm run build` producing `dist/`, and commit `package-lock.json` (the Docker build uses `npm ci`). Using yarn/pnpm? Change the two install lines in `docker/frontend.Dockerfile`.
 2. Call the backend with relative URLs: `fetch("/api/...")`. nginx (Docker/Kubernetes) and the Vite dev server both forward `/api/*` to the backend, so no CORS setup and no hard-coded addresses.
 3. Run: `npm run dev` for hot reload (section 6), or `docker compose up -d --build frontend` to test the production build.
 4. Build-time settings must start with `VITE_`; pass them as `build.args` in `docker-compose.yml`.
 
 ### Backend teammate (`backend/`)
+
 1. Keep: entrypoint `app.main:app`; `GET /health/live`; `GET /health/ready`; business routes under `/api/...` (nginx only forwards `/api/*`).
 2. Implement the real readiness check in `app/health.py` (for example `SELECT 1` through your connection pool) and keep `/health/live` independent of the database. The Kubernetes probes call exactly these two paths.
 3. Read configuration through `app/config.py`; `get_settings().database_url` builds the connection URL from the `POSTGRES_*` variables.
@@ -256,6 +273,7 @@ the Secret**. Then `minikube delete` / `kind delete cluster --name smart-locker`
 7. API docs are at http://localhost:8000/docs (published backend port; not reachable through the frontend's `/api` proxy).
 
 ### Database teammate (`database/`)
+
 1. Put schema SQL in `database/init/` (e.g. `01-schema.sql`). It runs **once**, on an empty volume. To re-run: `docker compose down -v`.
 2. Kubernetes does not mount `database/init/`. Agree with the backend teammate how the schema gets created there (migrations from the backend, or a ConfigMap mounted at `/docker-entrypoint-initdb.d`). Details in `database/README.md`.
 3. Tell the team if you change `POSTGRES_DB` or `POSTGRES_USER`: keep `.env.example` and `kubernetes/configmap.yaml` consistent.
@@ -264,32 +282,32 @@ the Secret**. Then `minikube delete` / `kind delete cluster --name smart-locker`
 
 **Docker Compose**
 
-| Symptom | Likely cause and fix |
-|---|---|
-| `required variable POSTGRES_PASSWORD is missing a value` | You have no `.env`, or the password is blank. `cp .env.example .env` and set it (or `make env`). |
-| `port is already allocated` / `address already in use` / `forbidden by its access permissions` | Another program uses (or Windows has reserved) 3000, 8000 or 5432. A local PostgreSQL on 5432 is the usual cause. Change `*_HOST_PORT` in `.env`, e.g. `POSTGRES_HOST_PORT=5433`, then `docker compose down` and `up` again. |
-| Phone cannot open `http://<laptop-ip>:3000` | Check `BIND_ADDRESS=0.0.0.0` in `.env` and that you re-ran `docker compose up -d`; both devices are on the same Wi-Fi; the Windows firewall allowed Docker and the network is "Private"; the Wi-Fi does not isolate clients (try a phone hotspot). |
-| Backend log: `password authentication failed` | The password in `.env` differs from the one the database was first created with. PostgreSQL only reads `POSTGRES_PASSWORD` on an **empty** volume. Either restore the old password or wipe the data: `docker compose down -v`. |
-| Scripts in `database/init/` did not run | They only run on an empty volume. `docker compose down -v`, then `up` again. |
-| Web page loads but says backend not reachable / `502 Bad Gateway` | Backend is down or unhealthy. `docker compose ps` and `docker compose logs backend`. |
-| `/health/ready` returns 503 | Backend cannot reach PostgreSQL: check `docker compose ps` (database healthy?) and the credentials. (503 here is the intended behaviour.) |
-| `npm ci` fails: lock file out of sync | Run `npm install` in `frontend/` and commit the updated `package-lock.json`. |
-| Image build fails while downloading base images | Check internet/VPN/proxy access to Docker Hub; Docker Hub also rate-limits anonymous pulls, so `docker login` can help. |
-| Windows: `exec ... no such file or directory` or `\r` errors | Line endings were converted to CRLF. `.gitattributes` prevents this on a fresh clone; re-clone or run `git add --renormalize .`. |
-| Everything is stale / strange | `docker compose down -v`, then `docker compose up --build` (deletes database data). |
+| Symptom                                                                                        | Likely cause and fix                                                                                                                                                                                                                               |
+| ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `required variable POSTGRES_PASSWORD is missing a value`                                       | You have no `.env`, or the password is blank. `cp .env.example .env` and set it (or `make env`).                                                                                                                                                   |
+| `port is already allocated` / `address already in use` / `forbidden by its access permissions` | Another program uses (or Windows has reserved) 3000, 8000 or 5432. A local PostgreSQL on 5432 is the usual cause. Change `*_HOST_PORT` in `.env`, e.g. `POSTGRES_HOST_PORT=5433`, then `docker compose down` and `up` again.                       |
+| Phone cannot open `http://<laptop-ip>:3000`                                                    | Check `BIND_ADDRESS=0.0.0.0` in `.env` and that you re-ran `docker compose up -d`; both devices are on the same Wi-Fi; the Windows firewall allowed Docker and the network is "Private"; the Wi-Fi does not isolate clients (try a phone hotspot). |
+| Backend log: `password authentication failed`                                                  | The password in `.env` differs from the one the database was first created with. PostgreSQL only reads `POSTGRES_PASSWORD` on an **empty** volume. Either restore the old password or wipe the data: `docker compose down -v`.                     |
+| Scripts in `database/init/` did not run                                                        | They only run on an empty volume. `docker compose down -v`, then `up` again.                                                                                                                                                                       |
+| Web page loads but says backend not reachable / `502 Bad Gateway`                              | Backend is down or unhealthy. `docker compose ps` and `docker compose logs backend`.                                                                                                                                                               |
+| `/health/ready` returns 503                                                                    | Backend cannot reach PostgreSQL: check `docker compose ps` (database healthy?) and the credentials. (503 here is the intended behaviour.)                                                                                                          |
+| `npm ci` fails: lock file out of sync                                                          | Run `npm install` in `frontend/` and commit the updated `package-lock.json`.                                                                                                                                                                       |
+| Image build fails while downloading base images                                                | Check internet/VPN/proxy access to Docker Hub; Docker Hub also rate-limits anonymous pulls, so `docker login` can help.                                                                                                                            |
+| Windows: `exec ... no such file or directory` or `\r` errors                                   | Line endings were converted to CRLF. `.gitattributes` prevents this on a fresh clone; re-clone or run `git add --renormalize .`.                                                                                                                   |
+| Everything is stale / strange                                                                  | `docker compose down -v`, then `docker compose up --build` (deletes database data).                                                                                                                                                                |
 
 **Kubernetes**
 
-| Symptom | Likely cause and fix |
-|---|---|
-| Pod `CreateContainerConfigError` | The Secret is missing. Run step 4, then `kubectl -n smart-locker describe pod <pod>` to confirm. |
-| `ErrImagePull` / `ImagePullBackOff` / `ErrImageNeverPull` on `smart-locker-*` | The image is not inside the cluster. Repeat step 3 for your cluster type. |
-| Backend pods stay `0/1` Ready | Readiness is failing. `kubectl -n smart-locker logs deployment/backend`, check the postgres pod is Ready, and `describe pod` for probe messages. |
-| `postgres` pod `Pending`, PVC `Pending` | No default StorageClass: `kubectl get storageclass`. minikube, kind and Docker Desktop normally have one. |
-| Changed the password but the database still uses the old one | Same rule as Compose: the data volume keeps the old password. To start fresh: `kubectl -n smart-locker scale deployment/postgres --replicas=0`, `kubectl -n smart-locker delete pvc postgres-data`, re-apply (`kubectl apply -k kubernetes/`), re-run `create-secret.sh`, scale back to 1. This deletes the data. |
-| Code changes do not appear | Rebuild, reload the image into the cluster, then `rollout restart` (see "After you change code"). |
-| `port-forward` fails: address in use | Choose another local port, e.g. `8081:80`. |
-| `unable to connect to the server` | The cluster is not running: start Docker Desktop's Kubernetes / `minikube start` / recreate the kind cluster, and check `kubectl config current-context`. |
+| Symptom                                                                       | Likely cause and fix                                                                                                                                                                                                                                                                                              |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pod `CreateContainerConfigError`                                              | The Secret is missing. Run step 4, then `kubectl -n smart-locker describe pod <pod>` to confirm.                                                                                                                                                                                                                  |
+| `ErrImagePull` / `ImagePullBackOff` / `ErrImageNeverPull` on `smart-locker-*` | The image is not inside the cluster. Repeat step 3 for your cluster type.                                                                                                                                                                                                                                         |
+| Backend pods stay `0/1` Ready                                                 | Readiness is failing. `kubectl -n smart-locker logs deployment/backend`, check the postgres pod is Ready, and `describe pod` for probe messages.                                                                                                                                                                  |
+| `postgres` pod `Pending`, PVC `Pending`                                       | No default StorageClass: `kubectl get storageclass`. minikube, kind and Docker Desktop normally have one.                                                                                                                                                                                                         |
+| Changed the password but the database still uses the old one                  | Same rule as Compose: the data volume keeps the old password. To start fresh: `kubectl -n smart-locker scale deployment/postgres --replicas=0`, `kubectl -n smart-locker delete pvc postgres-data`, re-apply (`kubectl apply -k kubernetes/`), re-run `create-secret.sh`, scale back to 1. This deletes the data. |
+| Code changes do not appear                                                    | Rebuild, reload the image into the cluster, then `rollout restart` (see "After you change code").                                                                                                                                                                                                                 |
+| `port-forward` fails: address in use                                          | Choose another local port, e.g. `8081:80`.                                                                                                                                                                                                                                                                        |
+| `unable to connect to the server`                                             | The cluster is not running: start Docker Desktop's Kubernetes / `minikube start` / recreate the kind cluster, and check `kubectl config current-context`.                                                                                                                                                         |
 
 ## 10. Test status and first-run checklist
 
@@ -297,23 +315,24 @@ This scaffold was assembled in a sandbox where Docker Hub was blocked by network
 **container images could not be built or started and no Kubernetes cluster was available**.
 Everything that could be checked without them was.
 
-| Item | Result |
-|---|---|
-| `docker compose config` (YAML, variable substitution, required-variable errors) | Verified: clear error without `.env`, correct resolved config with it |
-| Placeholder backend run natively: `/health/live`, `/health/ready`, `/api/ping` | Verified: liveness stays 200 with the database down; readiness is 503 without and 200 with a reachable database; no credentials in responses |
-| Placeholder frontend: `npm install`, `npm run build`; dev server proxying `/api` to the backend | Verified |
-| nginx config syntax (rendered with `BACKEND_URL`) | Verified with a static parser only, **not** by real nginx |
-| Kubernetes manifests: schema validation (strict) against Kubernetes 1.29, 1.31 and 1.37 | Verified |
-| Kubernetes manifests: cross-checks (labels/selectors, ports, ConfigMap/Secret keys, PVC name, 2 backend replicas, probe paths, no credentials in manifests) | Verified |
-| `kubernetes/create-secret.sh` logic (missing file, empty password, CRLF files, only credential keys stored) | Verified with a stand-in `kubectl`, **not** against a real cluster |
-| `make env`, Makefile dry runs | Verified |
-| `docker build` of the frontend and backend images | **Not verified** |
-| `docker compose up` end to end (healthy containers, database volume persistence, nginx `/api` proxy in the container, the web page at :3000) | **Not verified** |
-| nginx template substitution by the official image (`envsubst`) | **Not verified** |
-| `kubectl apply -k kubernetes/` on a cluster, probes, 2 running backend replicas, PVC binding | **Not verified** (kubectl and a cluster were not available) |
-| Loading images into minikube / kind / Docker Desktop | **Not verified** (commands are the standard ones) |
+| Item                                                                                                                                                        | Result                                                                                                                                       |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docker compose config` (YAML, variable substitution, required-variable errors)                                                                             | Verified: clear error without `.env`, correct resolved config with it                                                                        |
+| Placeholder backend run natively: `/health/live`, `/health/ready`, `/api/ping`                                                                              | Verified: liveness stays 200 with the database down; readiness is 503 without and 200 with a reachable database; no credentials in responses |
+| Placeholder frontend: `npm install`, `npm run build`; dev server proxying `/api` to the backend                                                             | Verified                                                                                                                                     |
+| nginx config syntax (rendered with `BACKEND_URL`)                                                                                                           | Verified with a static parser only, **not** by real nginx                                                                                    |
+| Kubernetes manifests: schema validation (strict) against Kubernetes 1.29, 1.31 and 1.37                                                                     | Verified                                                                                                                                     |
+| Kubernetes manifests: cross-checks (labels/selectors, ports, ConfigMap/Secret keys, PVC name, 2 backend replicas, probe paths, no credentials in manifests) | Verified                                                                                                                                     |
+| `kubernetes/create-secret.sh` logic (missing file, empty password, CRLF files, only credential keys stored)                                                 | Verified with a stand-in `kubectl`, **not** against a real cluster                                                                           |
+| `make env`, Makefile dry runs                                                                                                                               | Verified                                                                                                                                     |
+| `docker build` of the frontend and backend images                                                                                                           | **Not verified**                                                                                                                             |
+| `docker compose up` end to end (healthy containers, database volume persistence, nginx `/api` proxy in the container, the web page at :3000)                | **Not verified**                                                                                                                             |
+| nginx template substitution by the official image (`envsubst`)                                                                                              | **Not verified**                                                                                                                             |
+| `kubectl apply -k kubernetes/` on a cluster, probes, 2 running backend replicas, PVC binding                                                                | **Not verified** (kubectl and a cluster were not available)                                                                                  |
+| Loading images into minikube / kind / Docker Desktop                                                                                                        | **Not verified** (commands are the standard ones)                                                                                            |
 
 **First-run checklist for the first teammate with Docker (about 10 minutes):**
+
 1. `cp .env.example .env`, set a password, `docker compose up --build`.
 2. `docker compose ps`: `postgres`, `backend`, `frontend` all `healthy`.
 3. http://localhost:3000 shows "Backend reachable" and "Database reachable".
