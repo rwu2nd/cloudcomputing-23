@@ -56,7 +56,7 @@ def db_connection():
         cursor_factory=RealDictCursor,
     )
 
-
+'''
 # initialize schema within db
 def initialize_schema() -> None:
     """Small self-contained schema for this backend assignment; safe to run repeatedly."""
@@ -110,7 +110,7 @@ def startup():
     except psycopg2.Error:
         # /health/ready reports the real database state; no hidden in-memory fallback.
         pass
-
+'''
 
 # ====================================
 # Classes
