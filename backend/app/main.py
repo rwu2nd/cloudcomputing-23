@@ -26,6 +26,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, HTTPException, Path, status
 from pydantic import BaseModel, Field, ConfigDict
+from app.db import db_connection
+from app.api_extra import router as extra_router
 
 from app.config import get_settings
 from app.health import router as health_router
@@ -36,25 +38,26 @@ app = FastAPI(
     version="1.0.0",
 )
 app.include_router(health_router)
+app.include_router(extra_router)
 
 # ====================================
 # Database functions
 # ====================================
 
 # create database connection
-def db_connection():
-    """Create a short-lived connection; PostgreSQL is the source of truth across replicas."""
-    s = get_settings()
-    return psycopg2.connect(
-        host=s.postgres_host,
-        port=s.postgres_port,
-        dbname=s.postgres_db,
-        user=s.postgres_user,
-        password=s.postgres_password,
-        connect_timeout=3,
-        application_name="smart-locker-api",
-        cursor_factory=RealDictCursor,
-    )
+# def db_connection():
+#     """Create a short-lived connection; PostgreSQL is the source of truth across replicas."""
+#     s = get_settings()
+#     return psycopg2.connect(
+#         host=s.postgres_host,
+#         port=s.postgres_port,
+#         dbname=s.postgres_db,
+#         user=s.postgres_user,
+#         password=s.postgres_password,
+#         connect_timeout=3,
+#         application_name="smart-locker-api",
+#         cursor_factory=RealDictCursor,
+#     )
     
 # ====================================
 # Classes
