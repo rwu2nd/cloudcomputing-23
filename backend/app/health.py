@@ -11,12 +11,14 @@ manifests point at them) and keep their meaning:
                  it cannot (e.g. database down). Kubernetes then stops routing
                  requests to the pod without restarting it.
 """
-
+import psycopg2
 import socket
 
 from fastapi import APIRouter, Response, status
 
 from app.config import get_settings
+
+
 
 router = APIRouter(prefix="/health", tags=["health"])
 
