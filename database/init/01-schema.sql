@@ -44,9 +44,12 @@ CREATE TABLE IF NOT EXISTS locker_reservations (
             'UNALLOCATED'
         )
     ),
+
+    unlock_password_hash TEXT NULL,
+
     allocated_station_id BIGINT NULL
         REFERENCES locker_stations(id),
-    compartment_id BIGINT NULL UNIQUE
+    compartment_id BIGINT NULL
         REFERENCES locker_compartments(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     arrived_at TIMESTAMPTZ NULL,
