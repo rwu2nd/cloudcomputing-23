@@ -219,7 +219,7 @@ sh kubernetes/create-secret.sh
 **5. Apply the manifests:**
 
 ```bash
-kubectl apply -k kubernetes/
+kubectl apply -k .
 kubectl -n smart-locker get pods -w
 ```
 
