@@ -53,6 +53,8 @@ spec:
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
+            - name: postgres-init
+              mountPath: /docker-entrypoint-initdb.d
           readinessProbe:
             exec:
               command:
@@ -84,3 +86,6 @@ spec:
         - name: postgres-data
           persistentVolumeClaim:
             claimName: postgres-data
+        - name: postgres-init
+          configMap:
+            name: postgres-init
