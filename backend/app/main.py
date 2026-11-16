@@ -20,6 +20,10 @@ Requires psycopg2-binary. Tables are initialized idempotently at application sta
 import asyncio
 import logging
 from datetime import datetime, timezone
+import hashlib
+import secrets
+import string
+import hmac
 from enum import Enum
 from typing import Optional
 from uuid import UUID
@@ -221,8 +225,9 @@ class ReservationOut(BaseModel):
     created_at: datetime
     allocated_at: Optional[datetime] = None
 
-
-
+# define password for unlocking locker, min/max length
+class UnlockRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=100)
 
 # ====================================
 # Helper functions
@@ -368,6 +373,76 @@ def _process_if_queue_is_quiet_locked(cur) -> list[dict]:
     for station_id in quiet_station_ids:
         results.extend(_process_waiting_reservations_locked(cur, station_id))
     return results
+
+# convert generated psw into a hash and stores it instead
+def _hash_collection_password(password: str) -> str:
+    """Store a salted PBKDF2 hash instead of the plaintext password."""
+    salt = secrets.token_bytes(16)
+    iterations = 310000
+
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        iterations,
+    )
+
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
+
+
+def _verify_collection_password(password: str, stored_hash: str) -> bool:
+    """Verify a collection password against its stored hash."""
+    try:
+        algorithm, iterations, salt_hex, digest_hex = stored_hash.split("$")
+
+        if algorithm != "pbkdf2_sha256":
+            return False
+
+        expected = bytes.fromhex(digest_hex)
+
+        actual = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            bytes.fromhex(salt_hex),
+            int(iterations),
+        )
+
+        return hmac.compare_digest(actual, expected)
+
+    except (ValueError, TypeError):
+        return False
+
+# system generates password to unlock compartment. 
+def _generate_collection_password(cur, reservation_id: UUID):
+    """Generate a password once when a reservation first becomes ARRIVED."""
+
+    cur.execute(
+        """SELECT unlock_password_hash
+           FROM locker_reservations
+           WHERE id = %s
+           FOR UPDATE""",
+        (str(reservation_id),),
+    )
+
+    row = cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Reservation not found")
+
+    if row["unlock_password_hash"] is not None:
+        return None
+
+    alphabet = string.ascii_uppercase + string.digits
+    password = "".join(secrets.choice(alphabet) for _ in range(10))
+
+    cur.execute(
+        """UPDATE locker_reservations
+           SET unlock_password_hash = %s
+           WHERE id = %s""",
+        (_hash_collection_password(password), str(reservation_id)),
+    )
+
+    return password
 
 
 def _process_queue_once() -> int:
@@ -634,6 +709,104 @@ def process_reservations_queue():
         results = _process_if_queue_is_quiet_locked(cur)
     return {"processed": len(results), "results": results}
 
+# list of parcels available for collection
+@app.get("/api/parcels/collection", tags=["parcels"])
+def list_parcels_for_collection():
+    """List parcels that have arrived and are awaiting collection."""
+
+    with db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT
+                   r.id AS reservation_id,
+                   r.required_size,
+                   r.status,
+                   s.name AS station_name,
+                   c.label AS compartment_label
+               FROM locker_reservations r
+               JOIN locker_stations s
+                   ON s.id = r.allocated_station_id
+               JOIN locker_compartments c
+                   ON c.id = r.compartment_id
+               WHERE r.status = 'ARRIVED'
+               ORDER BY r.arrived_at ASC"""
+        )
+
+        return cur.fetchall()
+
+# receive parcel unlock locker feature
+@app.post("/api/reservations/{reservation_id}/unlock", tags=["parcels"])
+def unlock_locker(
+    reservation_id: UUID,
+    payload: UnlockRequest,
+):
+    """Verify collection password and simulate locker unlocking."""
+
+    with db_connection() as conn, conn.cursor() as cur:
+        reservation = _get_reservation(cur, reservation_id, lock=True)
+
+        if reservation["status"] != "ARRIVED":
+            raise HTTPException(
+                status_code=409,
+                detail="Parcel is not available for collection",
+            )
+
+        if reservation["compartment_id"] is None:
+            raise HTTPException(
+                status_code=409,
+                detail="No compartment is allocated",
+            )
+
+        cur.execute(
+            """SELECT unlock_password_hash
+               FROM locker_reservations
+               WHERE id = %s""",
+            (str(reservation_id),),
+        )
+
+        row = cur.fetchone()
+
+        if (
+            row is None
+            or row["unlock_password_hash"] is None
+            or not _verify_collection_password(
+                payload.password,
+                row["unlock_password_hash"],
+            )
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Incorrect collection password",
+            )
+
+        # Simulate unlocking and release the compartment.
+        cur.execute(
+            """UPDATE locker_compartments
+               SET reserved_by = NULL
+               WHERE id = %s AND reserved_by = %s""",
+            (
+                reservation["compartment_id"],
+                str(reservation_id),
+            ),
+        )
+
+        if cur.rowcount != 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Compartment allocation could not be verified",
+            )
+
+        cur.execute(
+            """UPDATE locker_reservations
+               SET status = 'FULFILLED', updated_at = NOW()
+               WHERE id = %s""",
+            (str(reservation_id),),
+        )
+
+        return {
+            "message": "Locker unlocked",
+            "reservation_id": str(reservation_id),
+            "status": "FULFILLED",
+        }
 
 @app.post("/api/reservations/{reservation_id}/fulfill", response_model=ReservationOut, tags=["reservations"])
 def fulfill_reservation(reservation_id: UUID):

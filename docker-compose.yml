@@ -20,6 +20,7 @@ x-db-settings: &db-settings
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped 
     environment:
       <<: *db-settings
     ports:
@@ -45,6 +46,7 @@ services:
       dockerfile: docker/backend.Dockerfile
     # Same tag the Kubernetes manifests use, so one build serves both.
     image: smart-locker-backend:local
+    restart: unless-stopped 
     environment:
       <<: *db-settings
       APP_ENV: ${APP_ENV:-development}
@@ -71,6 +73,7 @@ services:
       context: .
       dockerfile: docker/frontend.Dockerfile
     image: smart-locker-frontend:local
+    restart: unless-stopped 
     environment:
       # nginx forwards /api/* to this URL (no trailing slash).
       BACKEND_URL: http://backend:8000
@@ -89,6 +92,5 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-
 volumes:
   postgres_data:
