@@ -48,3 +48,14 @@ VALUES
         'ADMIN'
     )
 ON CONFLICT (username) DO NOTHING;
+
+INSERT INTO public."user"
+    (id, username, password_hash, role)
+VALUES
+    (
+        gen_random_uuid(),
+        'user',
+        'pbkdf2_sha256$310000$8f8189bd68b0701f417e497e299ce7c3$65cd8939d0686954c707b7e8d4cc7aba2c06ff7bdbbb0e9ddd2bdb7f436c09ce', -- Admin@12345
+        'USER'
+    )
+ON CONFLICT (username) DO NOTHING;
