@@ -29,9 +29,10 @@ def test_is_backend_ready():
     # a healthy, fully started compose stack should be ready
     assert response.status_code == 200
 
+
 def test_ping_endpoint():
     response = requests.get(
-        f"{BASE_URL}/api/ping",
+        f"{BASE_URL}/api",
         timeout=TIMEOUT,
     )
 
@@ -39,9 +40,10 @@ def test_ping_endpoint():
 
     data = response.json()
 
-    assert data["status"] == "ok"
-    assert data["service"] == "backend"
-    assert "environment" in data
-    assert isinstance(data["database_reachable"], bool)
-
-    assert data["database_reachable"] is True
+    assert data["service"] == "smart-locker-api"
+    assert data["docs"] == "/docs"
+    assert isinstance(data["workflow"], list)
+    assert len(data["workflow"]) > 0
+    assert "allocation_policy" in data
+    assert "queue_policy" in data
+    assert isinstance(data["queue_batch_window_ms"], (int, float))
