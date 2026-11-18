@@ -32,6 +32,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       # Optional init scripts (*.sql, *.sh). They run ONCE, when the volume is empty.
       # The schema belongs to the database teammate: see database/README.md.
+      # - ./database/init:/docker-entrypoint-initdb.d:ro
       - ./database/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
@@ -50,6 +51,10 @@ services:
     environment:
       <<: *db-settings
       APP_ENV: ${APP_ENV:-development}
+      LUGGAGE_DEMO_MODE: ${LUGGAGE_DEMO_MODE:-true}
+      LUGGAGE_AUTH_TTL_HOURS: ${LUGGAGE_AUTH_TTL_HOURS:-12}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-Admin@12345}
       # Service name on the Compose network (the Kubernetes Service is also called "postgres").
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"

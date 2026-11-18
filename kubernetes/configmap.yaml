@@ -11,6 +11,8 @@ metadata:
   namespace: smart-locker
 data:
   APP_ENV: development
+  LUGGAGE_DEMO_MODE: "true"
+  LUGGAGE_AUTH_TTL_HOURS: "12"
   # Kubernetes Service names (same names as in docker-compose.yml)
   POSTGRES_HOST: postgres
   POSTGRES_PORT: "5432"

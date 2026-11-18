@@ -109,145 +109,84 @@ def _verify_password(password: str, encoded_hash: str) -> bool:
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
-
 def _issue_access_token(cur, user_id: UUID) -> dict:
+
     token = secrets.token_urlsafe(32)
+
     cur.execute(
-        """INSERT INTO luggage_auth_sessions(id, user_id, token_hash, expires_at)
-           VALUES (%s, %s, %s, NOW() + (%s * INTERVAL '1 hour'))""",
-        (str(uuid4()), str(user_id), _hash_token(token), AUTH_TTL_HOURS),
+        """
+        INSERT INTO luggage_auth_sessions
+            (id, user_id, token_hash, expires_at)
+        VALUES
+            (%s, %s, %s, NOW() + (%s * INTERVAL '1 hour'))
+        """,
+        (
+            str(uuid4()),
+            str(user_id),
+            _hash_token(token),
+            AUTH_TTL_HOURS
+        )
     )
+
     return {
         "access_token": token,
         "token_type": "bearer",
-        "expires_in": AUTH_TTL_HOURS * 3600,
+        "expires_in": AUTH_TTL_HOURS * 3600
     }
-
 
 def _current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer),
 ) -> dict:
+
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=401, detail="Login required")
+
     token_hash = _hash_token(credentials.credentials)
+
     with _db_connection() as conn, conn.cursor() as cur:
         cur.execute(
-            """SELECT u.id, u.username
-               FROM luggage_auth_sessions a
-               JOIN luggage_users u ON u.id = a.user_id
-               WHERE a.token_hash = %s
-                 AND a.revoked_at IS NULL
-                 AND a.expires_at > NOW()""",
-            (token_hash,),
+            """
+            SELECT u.id, u.username, u.role
+            FROM luggage_auth_sessions AS a
+            JOIN public."user" AS u
+                ON u.id = a.user_id
+            WHERE a.token_hash = %s
+              AND a.revoked_at IS NULL
+              AND a.expires_at > NOW()
+            """,
+            (token_hash,)
         )
+
         user = cur.fetchone()
+
     if user is None:
-        raise HTTPException(status_code=401, detail="Login expired or invalid; please sign in again")
-    return {"id": user["id"], "username": user["username"]}
+        raise HTTPException(
+            status_code=401,
+            detail="Login expired or invalid; please sign in again"
+        )
+
+    return {
+        "id": user["id"],
+        "username": user["username"],
+        "role": user["role"]
+    }
+
+
+def authenticated_user(user: dict = Depends(_current_user)) -> dict:
+    """Expose the validated account identity to other API routers."""
+    return user
+
+
+def require_admin_user(user: dict = Depends(_current_user)) -> dict:
+    """Require a valid database-backed ADMIN account for privileged APIs."""
+    if user.get("role") != "ADMIN":
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    return user
 
 
 def _acquire_locker_lock(cur) -> None:
     """Use the same transaction lock as parcel allocation in app.main."""
     cur.execute("SELECT pg_advisory_xact_lock(%s::bigint)", (ALLOCATION_LOCK_KEY,))
-
-
-def initialize_luggage_schema() -> None:
-    """Create demo account/luggage tables and migrate the previous OTP/PIN schema.
-
-    Legacy phone/PIN columns are retained as nullable columns for compatibility.
-    Existing phone-only sessions cannot safely be assigned to a username account;
-    they remain in the database for an administrator to review/migrate manually.
-    """
-    ddl = """
-    CREATE TABLE IF NOT EXISTS luggage_users (
-        id UUID PRIMARY KEY,
-        username TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_luggage_users_username_lower
-        ON luggage_users(LOWER(username));
-
-    CREATE TABLE IF NOT EXISTS luggage_auth_sessions (
-        id UUID PRIMARY KEY,
-        user_id UUID NULL,
-        phone_number TEXT NULL,
-        token_hash TEXT NOT NULL UNIQUE,
-        expires_at TIMESTAMPTZ NOT NULL,
-        revoked_at TIMESTAMPTZ NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    ALTER TABLE luggage_auth_sessions ADD COLUMN IF NOT EXISTS user_id UUID;
-    ALTER TABLE luggage_auth_sessions ALTER COLUMN phone_number DROP NOT NULL;
-    DO $$ BEGIN
-        ALTER TABLE luggage_auth_sessions
-            ADD CONSTRAINT fk_luggage_auth_user
-            FOREIGN KEY (user_id) REFERENCES luggage_users(id);
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END $$;
-    CREATE INDEX IF NOT EXISTS idx_luggage_auth_user
-        ON luggage_auth_sessions(user_id, expires_at);
-
-    CREATE TABLE IF NOT EXISTS luggage_sessions (
-        id UUID PRIMARY KEY,
-        user_id UUID NULL,
-        phone_number TEXT NULL,
-        compartment_id BIGINT NOT NULL REFERENCES locker_compartments(id),
-        pin_hash TEXT NULL,
-        status TEXT NOT NULL CHECK (status IN
-            ('STORED','PAYMENT_PENDING','PAID_AWAITING_PICKUP','RETRIEVED','CANCELLED')),
-        stored_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        checkout_started_at TIMESTAMPTZ NULL,
-        billable_days INTEGER NULL,
-        amount_cents INTEGER NULL,
-        retrieved_at TIMESTAMPTZ NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    ALTER TABLE luggage_sessions ADD COLUMN IF NOT EXISTS user_id UUID;
-    ALTER TABLE luggage_sessions ALTER COLUMN phone_number DROP NOT NULL;
-    ALTER TABLE luggage_sessions ALTER COLUMN pin_hash DROP NOT NULL;
-    DO $$ BEGIN
-        ALTER TABLE luggage_sessions
-            ADD CONSTRAINT fk_luggage_session_user
-            FOREIGN KEY (user_id) REFERENCES luggage_users(id);
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END $$;
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_luggage_active_compartment
-        ON luggage_sessions(compartment_id)
-        WHERE status IN ('STORED','PAYMENT_PENDING','PAID_AWAITING_PICKUP');
-    CREATE INDEX IF NOT EXISTS idx_luggage_user_active
-        ON luggage_sessions(user_id, status);
-
-    CREATE TABLE IF NOT EXISTS luggage_payments (
-        id UUID PRIMARY KEY,
-        payment_reference UUID NOT NULL UNIQUE,
-        luggage_session_id UUID NOT NULL REFERENCES luggage_sessions(id),
-        amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
-        billable_days INTEGER NOT NULL CHECK (billable_days >= 1),
-        status TEXT NOT NULL CHECK (status IN ('PENDING','PAID','FAILED')),
-        provider_transaction_id TEXT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        paid_at TIMESTAMPTZ NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_luggage_payment_session
-        ON luggage_payments(luggage_session_id, created_at DESC);
-
-    CREATE TABLE IF NOT EXISTS luggage_unlock_events (
-        id UUID PRIMARY KEY,
-        luggage_session_id UUID NOT NULL REFERENCES luggage_sessions(id),
-        user_id UUID NOT NULL REFERENCES luggage_users(id),
-        compartment_id BIGINT NOT NULL REFERENCES locker_compartments(id),
-        action TEXT NOT NULL CHECK (action IN ('STORE','RETRIEVE')),
-        simulated BOOLEAN NOT NULL DEFAULT TRUE,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_luggage_unlock_session
-        ON luggage_unlock_events(luggage_session_id, created_at DESC);
-    """
-    with _db_connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT pg_advisory_xact_lock(%s::bigint)", (SCHEMA_LOCK_KEY,))
-        cur.execute(ddl)
 
 
 def _billable_days(stored_at: datetime, billing_end: datetime) -> int:
@@ -280,7 +219,7 @@ def _session_query() -> str:
                      c.station_id, s.name AS station_name, c.size
               FROM luggage_sessions ls
               JOIN locker_compartments c ON c.id = ls.compartment_id
-              JOIN locker_stations s ON s.id = c.station_id"""
+              JOIN locker s ON s.id = c.station_id"""
 
 
 @router.post("/auth/register", status_code=status.HTTP_201_CREATED, tags=["authentication"])
@@ -291,7 +230,7 @@ def register_account(payload: RegisterRequest):
     user_id = uuid4()
     with _db_connection() as conn, conn.cursor() as cur:
         cur.execute(
-            """INSERT INTO luggage_users(id, username, password_hash)
+            """INSERT INTO "user"(id, username, password_hash)
                VALUES (%s, %s, %s)
                ON CONFLICT DO NOTHING
                RETURNING id, username""",
@@ -302,9 +241,13 @@ def register_account(payload: RegisterRequest):
             raise HTTPException(status_code=409, detail="That username is already registered")
         token_response = _issue_access_token(cur, user["id"])
     return {
-        "user": {"id": str(user["id"]), "username": user["username"]},
+        "user": {
+            "id": str(user["id"]),
+            "username": user["username"],
+            "role": "USER"
+        },
         **token_response,
-        "message": "Account created successfully",
+        "message": "Account created successfully"
     }
 
 
@@ -314,7 +257,7 @@ def login_account(payload: LoginRequest):
     username = _normalize_username(payload.username)
     with _db_connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT id, username, password_hash FROM luggage_users WHERE username = %s",
+            """SELECT id, username, password_hash, role FROM public."user" WHERE LOWER(username) = LOWER(%s)""",
             (username,),
         )
         user = cur.fetchone()
@@ -323,8 +266,11 @@ def login_account(payload: LoginRequest):
             raise HTTPException(status_code=401, detail="Incorrect username or password")
         token_response = _issue_access_token(cur, user["id"])
     return {
-        "user": {"id": str(user["id"]), "username": user["username"]},
-        **token_response,
+        "user": {"id": str(user["id"]), 
+                 "username": user["username"], 
+                 "role": user["role"]
+        },
+        **token_response
     }
 
 
@@ -345,7 +291,7 @@ def logout_account(
 
 @router.get("/auth/me", tags=["authentication"])
 def get_current_account(user: dict = Depends(_current_user)):
-    return {"id": str(user["id"]), "username": user["username"]}
+    return {"id": str(user["id"]), "username": user["username"], "role": user["role"]}
 
 
 @router.get("/slots", tags=["luggage"])
@@ -356,7 +302,7 @@ def list_available_luggage_slots(user: dict = Depends(_current_user)):
             """SELECT c.id AS compartment_id, c.station_id, s.name AS station_name,
                       s.zone, c.label, c.size
                FROM locker_compartments c
-               JOIN locker_stations s ON s.id = c.station_id
+               JOIN locker s ON s.id = c.station_id
                WHERE c.size = 'XL' AND c.active = TRUE AND s.active = TRUE
                  AND c.reserved_by IS NULL
                ORDER BY s.id, c.label"""
@@ -374,7 +320,7 @@ def store_luggage(payload: StoreLuggageRequest, user: dict = Depends(_current_us
         cur.execute(
             """SELECT c.id, c.station_id, c.label, c.size, s.name AS station_name
                FROM locker_compartments c
-               JOIN locker_stations s ON s.id = c.station_id
+               JOIN locker s ON s.id = c.station_id
                WHERE c.id = %s AND c.size = 'XL' AND c.active = TRUE
                  AND s.active = TRUE AND c.reserved_by IS NULL
                FOR UPDATE OF c""",

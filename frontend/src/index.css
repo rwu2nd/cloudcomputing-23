@@ -12,3 +12,21 @@
 .booking-card small{color:#73849b}
 .booking-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .secondary-action{display:block;background:#fff;border:1px solid #cbd9e9;border-radius:9px;color:#244d85;font-weight:650;padding:10px 14px;margin-top:16px}
+
+/* Shared username/password entry and authenticated session header */
+.auth-main{max-width:560px;margin-top:72px}
+.auth-panel{display:grid;gap:18px}
+.auth-panel label{display:flex;flex-direction:column;gap:9px;font-size:13px;font-weight:750;color:#475d77}
+.auth-panel input{background:#fafcff;border:1px solid #cfdae7;border-radius:11px;padding:13px 14px;min-width:0;color:#172e4c}
+.auth-toggle{display:grid;grid-template-columns:1fr 1fr;gap:8px;background:#edf2f8;border-radius:11px;padding:5px}
+.auth-toggle button{border:0;border-radius:8px;background:transparent;padding:11px 8px;color:#60738c;font-weight:700}
+.auth-toggle button.selected{background:#fff;color:#1b4c90;box-shadow:0 1px 5px #1e32521c}
+.user-session,.admin-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.user-session{color:#64758b;font-size:13px}
+.user-session button{border:1px solid #cbd9e9;background:#fff;color:#244d85;border-radius:9px;padding:9px 13px;font-weight:700}
+.admin-heading{margin-bottom:20px}
+.admin-heading .secondary-action{margin:0}
+@media(max-width:620px){.auth-main{margin-top:38px}.auth-toggle{grid-template-columns:1fr}.user-session{width:100%;justify-content:space-between}.admin-heading{align-items:flex-start}}
+
+.luggage-action-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+@media(max-width:620px){.luggage-action-grid{grid-template-columns:1fr}}

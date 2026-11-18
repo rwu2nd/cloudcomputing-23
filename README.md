@@ -428,3 +428,24 @@ local Kubernetes cluster ([cluster type], 2026-11-15).
 4. `docker compose down` then `up -d`: the database volume still exists (`docker volume ls` shows `smart-locker_postgres_data`).
 5. Kubernetes: follow section 7; expect 2 ready backend pods, 2 ready frontend pods and the same page via port-forward.
 6. Fix anything that differs from the above and note it here, so the README stays accurate.
+
+
+## Luggage and admin demo workflows
+
+The luggage page uses the backend API (not browser-local demo bookings). It requires a username/password account and uses XL compartments only. In the local Compose environment, demo payment simulation is enabled by default (`LUGGAGE_DEMO_MODE=true`); it does not contact a real payment provider.
+
+The Admin dashboard is shown only after signing in with an account whose database `role` is `ADMIN`. All admin API routes validate the bearer token and database role; normal users cannot call the admin routes. Admin controls can still create real test allocations or release compartments, so use them carefully and restrict access to trusted administrators.
+
+Parcel reservations move from `CONDITIONAL` to `ALLOCATED` through the background queue worker. Once allocated, the frontend calls the arrival endpoint; the API returns the collection password once and stores only its salted password hash.
+
+
+## Login and default administrator
+
+The web app opens at a shared login page at `http://localhost:3000`. Sign in with either a normal user account or the seeded administrator account; the database role determines which dashboard appears. User accounts can be registered there; new registrations always receive the `USER` role. The backend creates the administrator account in `luggage_users` during schema initialisation if it does not already exist.
+
+- Default username: `admin`
+- Default password: `Admin@12345`
+
+Set `ADMIN_USERNAME` and `ADMIN_INITIAL_PASSWORD` in `.env` before starting the backend to use different initial credentials. The password must be 10-128 characters. Once the account exists, changing the environment password does not reset its stored password; change it through a password-management feature or a controlled database operation. Do not use the demo default in a deployed environment.
+
+Admin APIs require a valid bearer token belonging to a database account whose `role` is `ADMIN`. Normal registrations cannot assign themselves the administrator role.
