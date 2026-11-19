@@ -162,6 +162,7 @@ What the report measures, and the reliability term it corresponds to:
 | Metric | Cloud reliability term |
 |---|---|
 | Share of requests that succeeded | **Availability** (an SLI); compared with an SLO such as 99.9% |
+| Share of user journeys (parcel, luggage, booking churn) that completed in the end, retries included | **Journey success**: availability as a user experiences it. Every retry during an outage is another failed *request*, so request availability understates this. "No free locker" is contention, not a failure |
 | First to last failed request after a fault | **Downtime per incident** |
 | Fault injected to service working again | **Recovery time** (RTO / MTTR) |
 | Journeys clients saw complete vs rows in the database | **Data loss** (RPO) |
@@ -179,6 +180,7 @@ Example (stress-2eff76: medium intensity, 2 min, every load type and chaos event
 
 | Objective | Target | Measured | |
 |---|---|---|---|
+| User journeys completed in the end | ≥ 99% | 97.44% (parcels 126/126, luggage 59/67, churn 234/237) | FAIL |
 | Availability outside chaos | ≥ 99.9% | 100% | PASS |
 | Availability during chaos | ≥ 97% | 96.02% | FAIL |
 | Outage after DB primary killed | ≤ 10 s | 5 s | PASS |
@@ -190,7 +192,7 @@ Example (stress-2eff76: medium intensity, 2 min, every load type and chaos event
 | Completed journeys missing from the database | 0 | 0 (126 parcels, 59 luggage) | PASS |
 | Test lockers still held after the run | 0 | 0 | PASS |
 
-The two FAILs are worth keeping in a write-up: they show exactly where the system is weakest under
+The FAILs are worth keeping in a write-up: they show exactly where the system is weakest under
 combined chaos, and point at the next tuning step (e.g. a faster controller readiness probe would cut
 the 12 s, which is mostly the new pods waiting to be marked ready).
 
