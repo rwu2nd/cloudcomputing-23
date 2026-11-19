@@ -20,7 +20,9 @@ import json
 import logging
 import os
 import ssl
+import re
 import time
+from datetime import datetime
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -30,7 +32,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app import locker_controller
+from app import locker_controller, stress
 from app.luggage import require_admin_user
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,7 @@ SA_DIR = Path("/var/run/secrets/kubernetes.io/serviceaccount")
 K8S_HOST = os.getenv("KUBERNETES_SERVICE_HOST")
 K8S_PORT = os.getenv("KUBERNETES_SERVICE_PORT", "443")
 DB_CLUSTER = "locker-db"
+CONFIG_ANNOTATION = "smartlocker.io/stress-config"
 K6_IMAGE = "grafana/k6:1.8.2"
 
 
@@ -59,7 +62,7 @@ def _namespace() -> str:
 
 
 def k8s(method: str, path: str, body: Optional[dict] = None,
-        content_type: str = "application/json", missing_ok: bool = False):
+        content_type: str = "application/json", missing_ok: bool = False, raw: bool = False):
     """Minimal Kubernetes API call using the pod's service account."""
     if not in_kubernetes():
         raise HTTPException(status_code=409, detail="Only available when running in Kubernetes")
@@ -73,7 +76,8 @@ def k8s(method: str, path: str, body: Optional[dict] = None,
     ctx = ssl.create_default_context(cafile=str(SA_DIR / "ca.crt"))
     try:
         with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
-            return json.loads(resp.read() or b"null")
+            payload = resp.read()
+            return payload.decode(errors="replace") if raw else json.loads(payload or b"null")
     except urllib.error.HTTPError as exc:
         if exc.code == 404 and missing_ok:
             return None
@@ -246,10 +250,10 @@ def _latest_loadtest():
     state = ("running" if st.get("active") else
              "succeeded" if st.get("succeeded") else
              "failed" if st.get("failed") else "starting")
-    env = {e["name"]: e.get("value") for e in job["spec"]["template"]["spec"]["containers"][0].get("env", [])}
+    config = json.loads(job["metadata"].get("annotations", {}).get(CONFIG_ANNOTATION, "{}"))
     return {"name": job["metadata"]["name"], "state": state,
             "started": st.get("startTime"), "finished": st.get("completionTime"),
-            "peak_users": env.get("PEAK_USERS"), "hold": env.get("HOLD")}
+            "config": config}
 
 
 @router.get("/scalability")
@@ -281,55 +285,6 @@ def scalability(admin: dict = Depends(require_admin_user)):
         view["backend_pods"] = _pods("app=backend")
         view["load_test"] = _latest_loadtest()
     return view
-
-
-class LoadTest(BaseModel):
-    peak_users: int = Field(default=40, ge=5, le=80)
-    hold_minutes: int = Field(default=2, ge=1, le=5)
-
-
-@router.post("/scalability/loadtest")
-def start_loadtest(payload: LoadTest, admin: dict = Depends(require_controls)):
-    current = _latest_loadtest()
-    if current and current["state"] in ("running", "starting"):
-        raise HTTPException(status_code=409, detail="A load test is already running")
-    name = f"k6-load-test-{int(time.time())}"
-    job = {
-        "apiVersion": "batch/v1", "kind": "Job",
-        "metadata": {"name": name, "labels": {"app": "k6", "started-by": "admin-dashboard"}},
-        "spec": {
-            "backoffLimit": 0, "ttlSecondsAfterFinished": 1800,
-            "template": {
-                "metadata": {"labels": {"app": "k6"}},
-                "spec": {
-                    "restartPolicy": "Never",
-                    "containers": [{
-                        "name": "k6", "image": K6_IMAGE,
-                        "args": ["run", "--no-usage-report", "/scripts/smart-locker.js"],
-                        "env": [
-                            {"name": "BASE_URL", "value": f"http://frontend.{_namespace()}.svc.cluster.local"},
-                            {"name": "PEAK_USERS", "value": str(payload.peak_users)},
-                            {"name": "HOLD", "value": f"{payload.hold_minutes}m"},
-                        ],
-                        "volumeMounts": [{"name": "scripts", "mountPath": "/scripts"}],
-                        "resources": {"requests": {"cpu": "200m", "memory": "128Mi"},
-                                      "limits": {"cpu": "1", "memory": "512Mi"}},
-                    }],
-                    "volumes": [{"name": "scripts", "configMap": {"name": "k6-script"}}],
-                },
-            },
-        },
-    }
-    k8s("POST", f"/apis/batch/v1/namespaces/{_namespace()}/jobs", job)
-    logger.warning("Admin %s started load test %s", admin.get("username"), name)
-    return {"started": name, "peak_users": payload.peak_users, "hold_minutes": payload.hold_minutes}
-
-
-@router.delete("/scalability/loadtest")
-def stop_loadtest(admin: dict = Depends(require_controls)):
-    k8s("DELETE", f"/apis/batch/v1/namespaces/{_namespace()}/jobs?labelSelector=app%3Dk6",
-        {"kind": "DeleteOptions", "apiVersion": "v1", "propagationPolicy": "Background"})
-    return {"stopped": True}
 
 
 # ---------------------------------------------------------------- fault tolerance
@@ -405,3 +360,160 @@ def inject_faults(payload: Faults, admin: dict = Depends(require_controls)):
         patch, content_type="application/strategic-merge-patch+json")
     logger.warning("Admin %s set controller FAILURE_RATE=%s", admin.get("username"), payload.failure_rate)
     return {"failure_rate": payload.failure_rate}
+
+
+# ---------------------------------------------------------------- stress test
+
+SCENARIOS = ("browse", "parcel", "luggage", "churn")
+CHAOS = ("faults", "controller", "failover")
+# Virtual users per scenario for each intensity.
+INTENSITY = {
+    "low": {"browse": 10, "parcel": 4, "luggage": 2, "churn": 2},
+    "medium": {"browse": 25, "parcel": 8, "luggage": 3, "churn": 4},
+    "high": {"browse": 50, "parcel": 14, "luggage": 4, "churn": 6},
+}
+
+
+class StressRun(BaseModel):
+    scenarios: list[str] = Field(min_length=1)
+    chaos: list[str] = Field(default_factory=list)
+    intensity: str = Field(default="medium", pattern="^(low|medium|high)$")
+    minutes: int = Field(default=2, ge=1, le=5)
+    # Overrides the browse users of the chosen intensity (Scalability page).
+    browse_users: Optional[int] = Field(default=None, ge=5, le=80)
+
+
+@router.post("/stress")
+def start_stress(payload: StressRun, admin: dict = Depends(require_controls)):
+    unknown = set(payload.scenarios) - set(SCENARIOS) | set(payload.chaos) - set(CHAOS)
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown option(s): {', '.join(sorted(unknown))}")
+    current = _latest_loadtest()
+    if current and current["state"] in ("running", "starting"):
+        raise HTTPException(status_code=409, detail="A stress test is already running")
+
+    vus = {name: INTENSITY[payload.intensity][name] for name in payload.scenarios}
+    if payload.browse_users and "browse" in vus:
+        vus["browse"] = payload.browse_users
+    # A few more accounts than users so each journey has its own parcels.
+    prepared = stress.prepare_run({name: n + 2 for name, n in vus.items()})
+    duration = payload.minutes * 60
+    config = {"scenarios": payload.scenarios, "chaos": payload.chaos, "intensity": payload.intensity,
+              "minutes": payload.minutes, "vus": vus, "station_id": prepared["station_id"]}
+    name = f"stress-{prepared['run']}"
+    env = {
+        "BASE_URL": f"http://frontend.{_namespace()}.svc.cluster.local",
+        "SCENARIOS": ",".join(payload.scenarios),
+        "CHAOS": ",".join(payload.chaos),
+        "DURATION_S": str(duration),
+        "VUS_JSON": json.dumps(vus),
+        "USERS_JSON": json.dumps(prepared["users"]),
+        "LABELS_JSON": json.dumps(prepared["labels"]),
+        "STATION_ID": str(prepared["station_id"]),
+        "ADMIN_TOKEN": prepared["runner_token"],
+        "PASSWORD": prepared["password"],
+    }
+    job = {
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {"name": name, "labels": {"app": "k6", "started-by": "admin-dashboard"},
+                     "annotations": {CONFIG_ANNOTATION: json.dumps(config)}},
+        "spec": {
+            "backoffLimit": 0, "ttlSecondsAfterFinished": 1800,
+            "activeDeadlineSeconds": duration + 300,
+            "template": {
+                "metadata": {"labels": {"app": "k6", "stress-run": name}},
+                "spec": {
+                    "restartPolicy": "Never",
+                    "containers": [{
+                        "name": "k6", "image": K6_IMAGE,
+                        "args": ["run", "--no-usage-report", "--quiet", "/scripts/smart-locker.js"],
+                        "env": [{"name": k, "value": v} for k, v in env.items()],
+                        "volumeMounts": [{"name": "scripts", "mountPath": "/scripts"}],
+                        "resources": {"requests": {"cpu": "200m", "memory": "128Mi"},
+                                      "limits": {"cpu": "1", "memory": "512Mi"}},
+                    }],
+                    "volumes": [{"name": "scripts", "configMap": {"name": "k6-script"}}],
+                },
+            },
+        },
+    }
+    k8s("POST", f"/apis/batch/v1/namespaces/{_namespace()}/jobs", job)
+    logger.warning("Admin %s started stress test %s: %s", admin.get("username"), name, config)
+    return {"started": name, **config}
+
+
+@router.delete("/stress")
+def stop_stress(admin: dict = Depends(require_controls)):
+    """Stop the run, put any chaos back the way it was, and free the test lockers."""
+    k8s("DELETE", f"/apis/batch/v1/namespaces/{_namespace()}/jobs?labelSelector=app%3Dk6",
+        {"kind": "DeleteOptions", "apiVersion": "v1", "propagationPolicy": "Background"})
+    controller = _controller_deployment()
+    if controller["failure_rate"]:
+        inject_faults(Faults(failure_rate=0), admin)
+    if controller["replicas"] == 0:
+        scale_controller(ControllerScale(replicas=2), admin)
+    return {"stopped": True, **stress.reset()}
+
+
+@router.post("/stress/reset")
+def reset_stress(admin: dict = Depends(require_admin_user)):
+    """Free every test locker (also called by the k6 job when it finishes)."""
+    return stress.reset()
+
+
+_LOGFMT_MSG = re.compile(r'msg="((?:[^"\\]|\\.)*)"')
+_LOGFMT_TIME = re.compile(r'time="[^"]*T(\d\d:\d\d:\d\d)')
+
+
+def _console(job_name: str, lines: int = 300) -> list[str]:
+    """Readable lines from the k6 pod: its console.log output plus the summary."""
+    pods = k8s("GET", f"/api/v1/namespaces/{_namespace()}/pods?"
+               + urllib.parse.urlencode({"labelSelector": f"job-name={job_name}"})).get("items", [])
+    if not pods:
+        return []
+    text = k8s("GET", f"/api/v1/namespaces/{_namespace()}/pods/{pods[0]['metadata']['name']}/log?tailLines={lines}",
+               raw=True, missing_ok=True) or ""
+    out = []
+    for line in text.splitlines():
+        line = line.rstrip()
+        msg = _LOGFMT_MSG.search(line)
+        if msg:
+            when = _LOGFMT_TIME.search(line)
+            body = msg.group(1).replace('\\"', '"')
+            level = "ERROR " if "level=error" in line else ""
+            out.append(f"{when.group(1) if when else ''} {level}{body}".strip())
+        elif line.strip() and not line.lstrip().startswith(("running (", "default ", "execution:", "script:", "output:")):
+            out.append(line)  # end-of-run summary
+    return out[-120:]
+
+
+@router.get("/stress")
+def stress_status(admin: dict = Depends(require_admin_user)):
+    run = _latest_loadtest() if in_kubernetes() else None
+    since = None
+    if run and run.get("started"):
+        since = datetime.fromisoformat(run["started"].replace("Z", "+00:00"))
+    elapsed = (datetime.now(since.tzinfo) - since).total_seconds() if since else None
+    window = f"{max(60, int(elapsed or 60))}s"
+    hpa = None
+    if in_kubernetes():
+        hpa = k8s("GET", f"/apis/autoscaling/v2/namespaces/{_namespace()}/horizontalpodautoscalers/backend",
+                  missing_ok=True)
+    return {
+        "kubernetes": in_kubernetes(),
+        "run": run,
+        "elapsed_seconds": round(elapsed) if elapsed is not None else None,
+        "lockers": stress.snapshot(since),
+        "metrics": {
+            "requests_per_second": prom_scalar('sum(rate(smartlocker_http_requests_total{route!~"/health.*"}[30s]))'),
+            "error_rate_percent": prom_scalar(
+                '100 * (sum(rate(smartlocker_http_requests_total{status=~"5.."}[30s])) or vector(0)) '
+                '/ clamp_min(sum(rate(smartlocker_http_requests_total[30s])), 0.001)'),
+            "p95_latency_seconds": prom_scalar(
+                'histogram_quantile(0.95, sum by (le) (rate(smartlocker_http_request_duration_seconds_bucket{route!~"/health.*"}[30s])))'),
+            "doors_opened": prom_scalar(f'sum(increase(locker_controller_unlocks_total{{outcome="opened"}}[{window}]))') if since else None,
+            "backend_pods": (hpa or {}).get("status", {}).get("currentReplicas"),
+            "backend_pods_desired": (hpa or {}).get("status", {}).get("desiredReplicas"),
+        },
+        "console": _console(run["name"]) if run else [],
+    }

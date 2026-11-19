@@ -6,7 +6,7 @@
 // The buttons that change the cluster only work on Kubernetes after
 // `make k8s-demo-on`; otherwise they are shown disabled with the reason.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const DASHBOARD = "/grafana/d-solo/smart-locker/smart-locker-cloud-overview";
 
@@ -202,11 +202,11 @@ function Scalability({ request, status }) {
   const canAct = status?.demo_controls;
 
   const start = () =>
-    run(`Start a k6 load test with ${users} users for about ${hold + 2} minutes?`,
-      () => request("/demo/scalability/loadtest", { method: "POST", body: JSON.stringify({ peak_users: users, hold_minutes: hold }) }),
-      (r) => { reload(); return `Started ${r.started}. Watch the backend pods and CPU below.`; });
+    run(`Start a ${hold}-minute load test with ${users} users browsing and signing in?`,
+      () => request("/demo/stress", { method: "POST", body: JSON.stringify({ scenarios: ["browse"], minutes: hold, browse_users: users }) }),
+      (r) => { reload(); return `Started ${r.started}. Watch the backend pods and CPU below. (For bookings and chaos too, use the Stress Test page.)`; });
   const stop = () =>
-    run("Stop the running load test?", () => request("/demo/scalability/loadtest", { method: "DELETE" }),
+    run("Stop the running load test?", () => request("/demo/stress", { method: "DELETE" }),
       () => { reload(); return "Load test stopped. The autoscaler scales back down after about a minute."; });
 
   return (
@@ -233,7 +233,7 @@ function Scalability({ request, status }) {
           </select>
         </label>
         <label>
-          Minutes at peak
+          Minutes
           <select value={hold} onChange={(e) => setHold(Number(e.target.value))}>
             {[1, 2, 3, 5].map((n) => <option key={n} value={n}>{n}</option>)}
           </select>
@@ -314,9 +314,218 @@ function Fault({ request, status }) {
   );
 }
 
+
+// ------------------------------------------------------------ stress test
+
+const LOAD_OPTIONS = [
+  ["browse", "Browse & sign in", "CPU-heavy, drives autoscaling"],
+  ["parcel", "Parcel journeys", "book → allocate → arrive → unlock over gRPC"],
+  ["luggage", "Luggage sessions", "store → pay → unlock → collect"],
+  ["churn", "Book & cancel churn", "hammers the allocation queue"],
+];
+const CHAOS_OPTIONS = [
+  ["faults", "40% controller faults", "from 15% to 40% of the run"],
+  ["controller", "Controller outage", "stopped at 45% for 10-30 s"],
+  ["failover", "Kill DB primary", "at 70% of the run"],
+];
+const CHAOS_AT = { faults: 0.15, controller: 0.45, failover: 0.7 };
+const LOCKER_COLORS = { free: "#d8f5e5", booked: "#ffe9b3", parcel: "#f7c3c3", luggage: "#cfe0ff" };
+
+function Chip({ checked, onChange, title, hint, disabled }) {
+  return (
+    <label title={hint} style={{
+      display: "flex", alignItems: "center", gap: 7, padding: "7px 10px", borderRadius: 9, cursor: "pointer",
+      border: `1px solid ${checked ? "#3386d6" : "#d7e0ed"}`, background: checked ? "#eaf3ff" : "#fff",
+      fontSize: 13, fontWeight: 650, color: "#163153", flexDirection: "row",
+    }}>
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} style={{ margin: 0 }} />
+      <span>{title}<br /><small style={{ fontWeight: 500, color: "#66788d" }}>{hint}</small></span>
+    </label>
+  );
+}
+
+const mmss = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
+
+function Stress({ request, status }) {
+  const [view, , reload] = usePoll(request, "/demo/stress", 2000);
+  const [load, setLoad] = useState({ browse: true, parcel: true, luggage: true, churn: false });
+  const [chaos, setChaos] = useState({ faults: false, controller: false, failover: false });
+  const [intensity, setIntensity] = useState("medium");
+  const [minutes, setMinutes] = useState(2);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [busy, run] = useAction(setMessage, setError);
+  const consoleRef = useRef(null);
+  const stick = useRef(true);
+
+  const runInfo = view?.run;
+  const running = runInfo && ["running", "starting"].includes(runInfo.state);
+  const config = runInfo?.config || {};
+  const total = (config.minutes || minutes) * 60;
+  const elapsed = Math.min(view?.elapsed_seconds ?? 0, total);
+  const m = view?.metrics || {};
+  const res = view?.lockers?.reservations || {};
+  const lug = view?.lockers?.luggage || {};
+  const canAct = status?.demo_controls && !busy;
+  const selected = Object.keys(load).filter((k) => load[k]);
+
+  useEffect(() => {
+    const el = consoleRef.current;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
+  }, [view?.console]);
+
+  const start = () =>
+    run(null, () => request("/demo/stress", { method: "POST", body: JSON.stringify({
+      scenarios: selected, chaos: Object.keys(chaos).filter((k) => chaos[k]), intensity, minutes,
+    }) }), (r) => { reload(); return `Started ${r.started}.`; });
+  const stop = () =>
+    run("Stop the stress test now? Chaos is undone and the test lockers are freed.",
+      () => request("/demo/stress", { method: "DELETE" }), (r) => { reload(); return `Stopped. Released ${r.released} test lockers.`; });
+  const reset = () =>
+    run(null, () => request("/demo/stress/reset", { method: "POST" }), (r) => { reload(); return `Released ${r.released} test lockers.`; });
+
+  const tile = (label, value) => (
+    <div style={{ background: "#edf3fa", borderRadius: 9, padding: "8px 10px", minWidth: 0 }}>
+      <small style={{ color: "#66788d", fontSize: 11 }}>{label}</small>
+      <div style={{ fontSize: 18, fontWeight: 800 }}>{value ?? "–"}</div>
+    </div>
+  );
+  const outcome = (label, parts) => (
+    <p style={{ margin: "5px 0", fontSize: 13 }}>
+      <strong>{label}:</strong>{" "}
+      {parts.filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(" · ") || <span className="muted">nothing yet</span>}
+    </p>
+  );
+
+  return (
+    <div className="panel">
+      <p className="muted" style={{ marginTop: 0 }}>
+        Runs real bookings, door unlocks and luggage sessions on 14 test lockers in{" "}
+        <strong>Stress Test Bay</strong>. Users never see them and they do not count towards the real lockers.
+        Everything ticked runs at the same time, inside the cluster.
+      </p>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14 }}>
+        <div>
+          <small style={{ fontWeight: 800, color: "#475d77" }}>LOAD</small>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 6 }}>
+            {LOAD_OPTIONS.map(([id, title, hint]) => (
+              <Chip key={id} title={title} hint={hint} checked={load[id]} disabled={running}
+                onChange={(v) => setLoad((o) => ({ ...o, [id]: v }))} />
+            ))}
+          </div>
+        </div>
+        <div>
+          <small style={{ fontWeight: 800, color: "#475d77" }}>CHAOS DURING THE RUN</small>
+          <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
+            {CHAOS_OPTIONS.map(([id, title, hint]) => (
+              <Chip key={id} title={title} hint={hint} checked={chaos[id]} disabled={running}
+                onChange={(v) => setChaos((o) => ({ ...o, [id]: v }))} />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
+        <select value={intensity} disabled={running} onChange={(e) => setIntensity(e.target.value)} style={{ padding: 8, borderRadius: 8 }}>
+          <option value="low">Low intensity</option>
+          <option value="medium">Medium intensity</option>
+          <option value="high">High intensity</option>
+        </select>
+        <select value={minutes} disabled={running} onChange={(e) => setMinutes(Number(e.target.value))} style={{ padding: 8, borderRadius: 8 }}>
+          {[1, 2, 3, 5].map((n) => <option key={n} value={n}>{n} min</option>)}
+        </select>
+        <button className="primary" style={{ padding: "9px 16px" }} disabled={!canAct || running || !selected.length} onClick={start}>
+          {running ? "Running…" : "Start stress test"}
+        </button>
+        <button disabled={!canAct || !running} onClick={stop}>Stop</button>
+        <button disabled={busy || running} onClick={reset} title="Free every test locker">Reset test lockers</button>
+      </div>
+      <ControlsNotice status={status} />
+      {message && <div className="notice">{message}</div>}
+      {error && <div className="error">{error}</div>}
+
+      {runInfo && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#4b6483" }}>
+            <span><strong>{runInfo.name}</strong> · {runInfo.state} · {(config.scenarios || []).join(", ")}
+              {(config.chaos || []).length ? ` · chaos: ${config.chaos.join(", ")}` : ""}</span>
+            <span>{mmss(elapsed)} / {mmss(total)}</span>
+          </div>
+          <div style={{ position: "relative", height: 8, background: "#e3e9f2", borderRadius: 5, marginTop: 4 }}>
+            <div style={{ width: `${(100 * elapsed) / total}%`, height: "100%", background: running ? "#3386d6" : "#6ab28a", borderRadius: 5, transition: "width 1s linear" }} />
+            {(config.chaos || []).map((c) => (
+              <div key={c} title={c} style={{ position: "absolute", left: `${CHAOS_AT[c] * 100}%`, top: -3, width: 3, height: 14, background: "#ae3535", borderRadius: 2 }} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 6, marginTop: 12 }}>
+        {tile("Backend pods", m.backend_pods != null ? (m.backend_pods_desired !== m.backend_pods ? `${m.backend_pods} → ${m.backend_pods_desired}` : m.backend_pods) : null)}
+        {tile("Requests / s", m.requests_per_second != null ? m.requests_per_second.toFixed(0) : null)}
+        {tile("5xx errors", m.error_rate_percent != null ? `${m.error_rate_percent.toFixed(1)}%` : null)}
+        {tile("p95 latency", m.p95_latency_seconds != null ? `${(m.p95_latency_seconds * 1000).toFixed(0)} ms` : null)}
+        {tile("Doors opened", m.doors_opened != null ? Math.round(m.doors_opened) : null)}
+        {tile("Parcels collected", res.FULFILLED ?? (runInfo ? 0 : null))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14, marginTop: 12 }}>
+        <div>
+          <small style={{ fontWeight: 800, color: "#475d77" }}>TEST LOCKERS</small>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+            {(view?.lockers?.lockers || []).map((l) => (
+              <div key={l.id} title={`${l.label}: ${l.state}`} style={{
+                width: 44, height: 30, borderRadius: 6, fontSize: 10, fontWeight: 700, display: "grid", placeItems: "center",
+                background: LOCKER_COLORS[l.state], border: "1px solid #c9d5e3", transition: "background .3s",
+              }}>{l.label.replace("T-", "")}</div>
+            ))}
+            {!view?.lockers && <span className="muted">Created on the first run.</span>}
+          </div>
+          <div style={{ display: "flex", gap: 10, fontSize: 11, color: "#66788d", marginTop: 6, flexWrap: "wrap" }}>
+            {Object.entries({ free: "free", booked: "booked", parcel: "parcel inside", luggage: "luggage inside" }).map(([k, v]) => (
+              <span key={k}><span style={{ display: "inline-block", width: 9, height: 9, borderRadius: 2, background: LOCKER_COLORS[k], border: "1px solid #c9d5e3" }} /> {v}</span>
+            ))}
+          </div>
+        </div>
+        <div>
+          <small style={{ fontWeight: 800, color: "#475d77" }}>WHAT HAPPENED THIS RUN</small>
+          {outcome("Parcels", [["collected", res.FULFILLED], ["in a locker", res.ARRIVED], ["allocated", res.ALLOCATED],
+            ["waiting for a locker", res.CONDITIONAL], ["cancelled", res.CANCELLED]])}
+          {outcome("Luggage", [["collected", lug.RETRIEVED], ["stored", (lug.STORED || 0) + (lug.PAYMENT_PENDING || 0) + (lug.PAID_AWAITING_PICKUP || 0)],
+            ["cancelled", lug.CANCELLED]])}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <small style={{ fontWeight: 800, color: "#475d77" }}>CONSOLE</small>
+        <div ref={consoleRef}
+          onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30; }}
+          style={{ marginTop: 6, height: 190, overflowY: "auto", background: "#0f1b2d", color: "#cfe3ff", borderRadius: 10,
+            padding: "8px 10px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12, lineHeight: 1.5 }}>
+          {(view?.console || []).length === 0 && <div style={{ color: "#7f93ad" }}>Output of the running test appears here.</div>}
+          {(view?.console || []).map((line, i) => (
+            <div key={i} style={{
+              whiteSpace: "pre-wrap",
+              color: /FAILED|ERROR/.test(line) ? "#ff9b9b" : line.includes("[chaos]") ? "#ffd27a" : undefined,
+            }}>{line}</div>
+          ))}
+        </div>
+      </div>
+
+      <details style={{ marginTop: 12 }}>
+        <summary style={{ cursor: "pointer", fontWeight: 700, color: "#2254ab" }}>Graphs</summary>
+        <GrafanaPanel id={9} title="Requests / s per backend pod" available={status?.prometheus} />
+        <GrafanaPanel id={14} title="Unlock calls by result" available={status?.prometheus} />
+        <GrafanaPanel id={20} title="PostgreSQL instances" available={status?.prometheus} />
+      </details>
+    </div>
+  );
+}
+
 export default function CloudDemo({ page, request }) {
   const [status] = usePoll(request, "/demo/status", 10000);
-  const Page = { balancing: Balancing, scalability: Scalability, fault: Fault }[page];
+  const Page = { stress: Stress, balancing: Balancing, scalability: Scalability, fault: Fault }[page];
   return (
     <>
       {status?.prometheus && (

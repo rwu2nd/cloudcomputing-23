@@ -1,6 +1,6 @@
 # Identity for the backend pods, and READ-ONLY access to the objects shown on
 # the admin dashboard's System tests pages (pods, autoscaler, database
-# cluster, load-test jobs). Namespaced only. Changing anything needs the extra
+# cluster, load-test jobs and their logs). Namespaced only. Changing anything needs the extra
 # Role in kubernetes/demo-controls/, which is not applied by default.
 apiVersion: v1
 kind: ServiceAccount
@@ -17,6 +17,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
+  # The Stress Test page's live console shows the load-test pod's output.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get"]

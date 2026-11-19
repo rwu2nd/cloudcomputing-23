@@ -36,6 +36,7 @@ const scenarios = [
     "Concurrency Test",
     "Race real arrivals and verify allocations",
   ],
+  ["stress", "Stress Test", "Real bookings on test lockers, pick load and chaos"],
   ["balancing", "Load Balancing", "See which pods answer HTTP and gRPC calls"],
   ["scalability", "Scalability", "Load test the backend and watch it autoscale"],
   ["fault", "Fault Tolerance", "Kill the database primary or the door controller"],
