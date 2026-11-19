@@ -1,13 +1,20 @@
-# Smart Locker System - Infrastructure Scaffold
+# ParcelPoint: Smart Locker System
 
-Docker and Kubernetes infrastructure for the smart locker coursework project. It gives the team a
-working frame (containers, database volume, configuration, health checks, Kubernetes manifests)
-that the frontend, backend and database code plugs into. **No locker business logic, UI,
-API endpoints or database schema is included.**
+ParcelPoint is a smart locker network for the cloud computing coursework project. People collect
+parcels and store luggage at locker stations (Central Hub, North Point, South Plaza); administrators
+assign parcels, watch every compartment and run live system tests. It runs on Docker Compose for
+development and on a local Kubernetes cluster (minikube, kind or Docker Desktop) to show the cloud
+side: microservices talking over gRPC, autoscaling, a replicated database with automatic failover,
+monitoring, stress tests with reliability reports, and CI/CD.
+
+- **Run it:** [RUNNING.md](RUNNING.md) has the short version; sections 4 and 7 below have the details.
+- **Demo it:** [CLOUD.md](CLOUD.md) maps each cloud concept to the code and gives a step-by-step demo script with measured results.
 
 ```
 Browser --REST--> frontend (nginx :80) --/api/*--> backend (FastAPI :8000) --gRPC--> locker-controller (:50051)
-                  serves the React build           2-6 pods (autoscaled)            simulated door hardware
+          <--SSE--  serves the React build          2-6 pods (autoscaled)            simulated door hardware
+                    and /grafana/                       |
+                                                        +--gRPC stream--> notification-service (:50051)
                                                         |
                                                         +--> PgBouncer --> PostgreSQL
                                                                            Compose: 1 container
@@ -16,30 +23,29 @@ Browser --REST--> frontend (nginx :80) --/api/*--> backend (FastAPI :8000) --gRP
 Prometheus scrapes the backend, the controller and the database; Grafana shows the dashboard.
 ```
 
-**[CLOUD.md](CLOUD.md)** explains which cloud-computing concepts the project shows, where they live in
-the code, and gives a step-by-step demo script with measured results.
+## 1. What's in it
 
-## 1. Status at a glance
+| Area | What it does |
+|---|---|
+| Frontend | React + Vite app served by nginx: sign-in and registration, parcel booking and collection, luggage storage with demo payment, notifications with a live badge, and the admin dashboard (Assign Parcels, Locker Status, Testing System). nginx forwards `/api/*` to the backend and `/grafana/` to Grafana. |
+| Backend | FastAPI: reservations with a background allocation queue (a PostgreSQL advisory lock keeps it correct across replicas), luggage sessions and demo payments, bearer-token auth with USER and ADMIN roles, admin APIs, a bridge to the notification service (server-sent events), the admin demo and stress-test APIs, and Prometheus metrics at `/metrics`. Returns 503, not 500, when the database is down. |
+| Database | PostgreSQL 16. Schema and seed data in `database/init/` (stations, compartments, `admin` and `jane`, sample parcels), used by both Compose and Kubernetes. |
+| gRPC services | `locker-controller/` simulates the door hardware: the backend calls it with deadlines, retries, round-robin load balancing and health checks. `notification-service/` stores notifications and streams new ones to the backend. |
+| Docker Compose | All services for development, health-checked and restarted on failure; optional Prometheus + Grafana (`--profile monitoring`). |
+| Kubernetes | PostgreSQL as a 3-instance CloudNativePG cluster behind PgBouncer, backend autoscaled 2-6 pods, 2 controller pods, 2 frontend pods, the notification service, PodDisruptionBudgets, Prometheus + Grafana, an in-cluster k6 load test, and optional demo permissions (`make k8s-demo-on`). |
+| Testing and reliability | API tests in `tests/`, a Stress Test on dedicated test lockers that users never see (any mix of load plus chaos events), and a run report per stress test with an SLO scorecard and journey success (see [section 12](#12-admin-dashboard-system-tests)). |
+| Fault tolerance | Restart policies, replicas, probes, rolling updates, automatic database failover, graceful gRPC shutdown (see [section 8](#8-fault-tolerance)). |
+| CI/CD | GitHub Actions: build and test with Compose, deploy to a 3-node kind cluster and test again after killing the database primary, publish images to GitHub Container Registry on `main`. |
 
-| Area | Provided by the scaffold (placeholder) | Your team implements |
-|---|---|---|
-| Frontend | Vite + React project, one placeholder page that calls `/api/ping` and shows whether the backend and database are reachable. Dockerfile, nginx serving + `/api` proxy. | The real UI (replace `frontend/src/`). |
-| Backend | FastAPI app with `/health/live`, `/health/ready` (placeholder TCP check of the database) and a placeholder `/api/ping`. Settings read from environment variables. Dockerfile. | Real readiness check, all API endpoints, locker logic, database access layer. Delete `/api/ping` when no longer needed. |
-| Database | PostgreSQL 16 container, persistent volume, credentials from environment, health check. | The schema (tables, migrations, seed data). **Nothing is created for you.** |
-| Docker Compose | Runs all three services, waits for healthy dependencies, restarts them after a crash. | - |
-| Kubernetes | Namespace, ConfigMap, Secrets from `.env`, PostgreSQL as a 3-instance CloudNativePG cluster with a PgBouncer pooler, backend Deployment autoscaled 2-6 pods (HPA), gRPC locker-controller (2 pods, headless Service), frontend (2 pods), PodDisruptionBudgets, Prometheus + Grafana, in-cluster k6 load test. | - |
-| gRPC | `proto/` contract, `locker-controller/` service, backend client with deadlines, retries, round-robin load balancing and client-side health checking (see [CLOUD.md](CLOUD.md)). | - |
-| Fault tolerance | Restart policies, replicas, probes, rolling updates, automatic database failover, graceful gRPC shutdown (see [section 8](#8-fault-tolerance)). | - |
-| CI/CD | GitHub Actions: build + test with Compose, deploy to a 3-node kind cluster and test (including a database failover), publish images to GitHub Container Registry on `main`. | - |
-
-Most of this has now been run on a real machine. **Read [Test status](#11-test-status-and-first-run-checklist) to see what is confirmed and what is not.**
+[Test status](#11-test-status-and-first-run-checklist) lists what has been verified and where.
 
 ## 2. Project structure
 
 ```
 smart-locker-system/
 ├── README.md
-├── docker-compose.yml        # frontend + backend + PostgreSQL for local development
+├── RUNNING.md                # how to run, test and troubleshoot it locally
+├── docker-compose.yml        # every service for local development
 ├── .env.example              # copy to .env (git-ignored) and set the database password
 ├── Makefile                  # optional shortcuts (everything is also given as plain commands)
 ├── kustomization.yaml        # `kubectl apply -k .` (lives in the root so it can read database/init/ and monitoring/)
@@ -50,17 +56,21 @@ smart-locker-system/
 ├── monitoring/               # Prometheus scrape configs + Grafana dashboard (used by Compose and Kubernetes)
 ├── tests/                    # pytest API tests (test_end_to_end.py runs against Compose or Kubernetes)
 ├── .github/workflows/ci.yml  # CI/CD pipeline
-├── frontend/                 # React + Vite            -> frontend teammate
+├── frontend/                 # React + Vite
 │   ├── package.json, package-lock.json, vite.config.js, index.html
-│   └── src/                  # PLACEHOLDER page: replace
-├── backend/                  # FastAPI                 -> backend teammate
+│   └── src/                  # App.jsx, LuggagePortal.jsx, AdminPanel.jsx, CloudDemos.jsx (system tests), notifications
+├── backend/                  # FastAPI
 │   ├── requirements.txt
-│   └── app/                  # main.py, luggage.py, locker_controller.py (gRPC client), metrics.py, ...
-├── database/                 # PostgreSQL              -> database teammate
+│   └── app/                  # main.py, luggage.py, locker_controller.py and notifications_api.py (gRPC clients),
+│                             #   metrics.py, demo.py and stress.py (system tests and run reports), ...
+├── database/                 # PostgreSQL
 │   ├── README.md
-│   └── init/                 # *.sql / *.sh run once on a fresh volume (Compose only)
+│   ├── init/                 # schema + seed, run once on a fresh database (Compose and Kubernetes)
+│   ├── migrations/           # SQL for databases created before a schema change
+│   └── maintenance/          # cleanup-test-users.sql (`make cleanup-users`)
 ├── docker/
 │   ├── backend.Dockerfile, frontend.Dockerfile, locker-controller.Dockerfile
+│   │                         #   (notification-service/ has its own Dockerfile)
 │   └── nginx/default.conf.template
 └── kubernetes/
     ├── namespace.yaml, configmap.yaml
@@ -73,7 +83,8 @@ smart-locker-system/
     ├── notification-service/ # deployment.yaml (1 replica, see comment), service.yaml
     ├── frontend/             # deployment.yaml (2 replicas + probes), service.yaml, pdb.yaml
     ├── monitoring/           # prometheus.yaml, grafana.yaml
-    ├── loadtest/             # k6 load test Job (`make k8s-loadtest`)
+    ├── loadtest/             # k6 script (stress tests) and a plain load-test Job (`make k8s-loadtest`)
+    ├── demo-controls/        # extra backend permissions for the dashboard's demo buttons (`make k8s-demo-on`)
     └── kind-cluster.yaml     # 3-node kind cluster (used by CI)
 ```
 
@@ -108,7 +119,7 @@ First start takes a few minutes (it downloads base images). When it is up:
 
 | What | URL |
 |---|---|
-| Placeholder web page (should show "Backend reachable" and "Database reachable") | http://localhost:3000 |
+| The app (sign in as `admin` / `Admin@12345`, or register a user) | http://localhost:3000 |
 | Backend liveness / readiness | http://localhost:8000/health/live , http://localhost:8000/health/ready |
 | Backend interactive API docs (FastAPI) | http://localhost:8000/docs |
 | PostgreSQL from your machine | `localhost:5432` (user, password and database name from `.env`) |
@@ -118,7 +129,7 @@ Everyday commands:
 
 ```bash
 docker compose up -d --build      # start in the background (rebuilds changed images)
-docker compose ps                 # postgres, backend, locker-controller, frontend should become "healthy"
+docker compose ps                 # postgres, backend, locker-controller, frontend "healthy"; notification-service "Up"
 docker compose logs -f backend    # follow one service's logs
 docker compose up -d --build backend   # rebuild and restart only the backend
 docker compose down               # stop; database data is KEPT
@@ -126,6 +137,7 @@ docker compose down -v            # stop AND DELETE the database volume (fresh d
 
 docker compose --profile monitoring up -d          # also start Prometheus + Grafana
 docker compose up -d --scale locker-controller=2   # two gRPC controllers, calls are load-balanced
+make cleanup-users                                 # delete every account except admin and jane, with their data
 ```
 
 Open a SQL shell: `docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`
@@ -162,12 +174,18 @@ Secret created from it. Compose refuses to start while `POSTGRES_PASSWORD` is em
 | `BACKEND_URL` = `http://backend:8000` | frontend's nginx | `docker-compose.yml` | ConfigMap |
 | `LOCKER_CONTROLLER_ADDR` | backend (gRPC client) | `docker-compose.yml` (`dns:///locker-controller:50051`) | ConfigMap (headless Service address). Unset = door unlocks simulated in-process |
 | `CONTROLLER_FAILURE_RATE`, `CONTROLLER_ACTUATION_MS` | locker-controller | `.env` (defaults 0 and 80) | env in `kubernetes/locker-controller/deployment.yaml` |
+| `NOTIFICATION_SERVICE_URL` | backend (gRPC client) | default `notification-service:50051` | ConfigMap (full service name) |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | notification-service | `docker-compose.yml` (from the `POSTGRES_*` values) | ConfigMap and Secret `locker-db-secret` |
+| `PROMETHEUS_URL` | backend (system tests, run reports) | default `http://prometheus:9090` | same default |
+| `GRAFANA_URL` | frontend's nginx (`/grafana/`) | `docker-compose.yml` | env in `kubernetes/frontend/deployment.yaml` |
+| `ADMIN_USERNAME`, `ADMIN_INITIAL_PASSWORD` | backend | `.env` | not set (the seeded `admin` is used) |
+| `LUGGAGE_DEMO_MODE`, `LUGGAGE_AUTH_TTL_HOURS` | backend | `.env` (defaults `true`, `12`) | ConfigMap |
 | `VITE_API_BASE_URL` (default `/api`) | frontend build | Dockerfile build argument | - |
 
 Service names are the same in Compose and Kubernetes (`backend`, `frontend`, `locker-controller`,
-`prometheus`, `grafana`). The database is the exception: Kubernetes reaches it through the pooler
+`notification-service`, `prometheus`, `grafana`). The database is the exception: Kubernetes reaches it through the pooler
 (`locker-db-pooler-rw`) instead of `postgres`. Host ports (`FRONTEND_HOST_PORT`, `BACKEND_HOST_PORT`,
-`POSTGRES_HOST_PORT`) can be changed in `.env` if something on your laptop already uses them.
+`POSTGRES_HOST_PORT`, `NOTIFICATION_HOST_PORT`, `PROMETHEUS_HOST_PORT`, `GRAFANA_HOST_PORT`) can be changed in `.env` if something on your laptop already uses them.
 
 **Adding a new setting for the backend**
 
@@ -278,7 +296,7 @@ kubectl -n smart-locker get pods -w
 
 Expected when ready (about 2 minutes, the database cluster starts its instances one after the other):
 `locker-db-1/2/3` (1 primary, 2 replicas), 2 `locker-db-pooler-rw`, 2 `backend`, 2 `locker-controller`,
-2 `frontend`, 1 `prometheus`, 1 `grafana`, all `1/1 Running`.
+1 `notification-service`, 2 `frontend`, 1 `prometheus`, 1 `grafana`, all `1/1 Running`.
 (Use `kubectl apply -k`, not `kubectl apply -f kubernetes/`: kustomize applies things in the right order and builds the ConfigMaps.)
 
 **6. Open the app and the dashboards:**
@@ -310,7 +328,8 @@ kubectl -n smart-locker logs deployment/backend
 ```
 
 **After you change code:** `make k8s-images`, then
-`kubectl -n smart-locker rollout restart deployment/backend` (or `deployment/locker-controller`, `deployment/frontend`).
+`kubectl -n smart-locker rollout restart deployment/backend` (or `deployment/locker-controller`, `deployment/frontend`,
+`deployment/notification-service`).
 The tag stays `:local`, so Kubernetes needs the restart to pick up the new image.
 
 **Clean up:** `kubectl delete -k .` removes everything, **including the database data and
@@ -319,7 +338,8 @@ the Secrets**. Then `minikube delete` / `kind delete cluster --name smart-locker
 ## 8. Fault tolerance
 
 The system keeps working, or recovers by itself, when a container, a pod or the database restarts.
-This was tested by hand on a local Kubernetes cluster ([cluster type]); see "Demonstration" below to repeat it.
+This was tested on minikube and, in CI, on a 3-node kind cluster; see "Demonstration" below to repeat it,
+or run the same failures from the admin dashboard's Fault Tolerance and Stress Test pages (section 12).
 
 ### What provides it
 
@@ -341,6 +361,7 @@ This was tested by hand on a local Kubernetes cluster ([cluster type]); see "Dem
 | Kubernetes | Tolerations `tolerationSeconds: 30` | Pods leave a dead node after 30 s instead of the default 5 minutes |
 | Backend | Door unlocks are a gRPC call **outside** the database lock, with a 3 s deadline and retries | A slow or dead controller never blocks bookings; users get a 503 for unlocks only |
 | locker-controller | gRPC health protocol + graceful drain + `preStop` | Rolling updates of the controller drop no calls (756 of 756 succeeded in testing) |
+| Stress-test journeys | Door unlocks are retried like a user tapping again; a luggage claim whose door did not open is released | Parcel journeys complete through controller outages and failovers (126 of 126 in a full chaos run) |
 
 ### Demonstration
 
@@ -369,6 +390,7 @@ kubectl -n smart-locker exec deploy/frontend -- sh -c 'while true; do wget -q -T
 | 5 | The locker-controller goes away | `kubectl -n smart-locker scale deployment/locker-controller --replicas=0` | Unlocking a locker in the app fails after 3 s with "The locker controller is not responding"; browsing and booking still work. Scale back to 2 and unlocking works again |
 | 6 | The controller is flaky | `kubectl -n smart-locker set env deployment/locker-controller FAILURE_RATE=0.4` | Unlocks still succeed: gRPC retries absorb the injected faults (Grafana shows them). Set it back to `0` afterwards |
 | 7 | Load spike | `make k8s-loadtest`, and in another terminal `kubectl -n smart-locker get hpa backend -w` | The autoscaler goes from 2 to up to 6 backend pods, then scales back down a minute or two after the test |
+| 8 | Everything at once | Admin dashboard → Testing System → Stress Test, with load and chaos ticked (`make k8s-demo-on` first) | Real bookings keep completing on the test lockers; the run report scores availability, outage per event, recovery and correctness |
 
 To check the data survived demo 4, list the tables on the new primary before and after:
 
@@ -401,7 +423,7 @@ ran crash recovery from its write-ahead log (`automatic recovery in progress`), 
 
 ### Frontend teammate (`frontend/`)
 
-1. Replace `src/` (and `index.html` if needed). Keep `npm run build` producing `dist/`, and commit `package-lock.json` (the Docker build uses `npm ci`). Using yarn/pnpm? Change the two install lines in `docker/frontend.Dockerfile`.
+1. Screens live in `src/`: `App.jsx` (sign-in, parcels), `LuggagePortal.jsx`, `AdminPanel.jsx` (admin views) with `CloudDemos.jsx` (the Testing System pages), and the notification files. Keep `npm run build` producing `dist/`, and commit `package-lock.json` (the Docker build uses `npm ci`).
 2. Call the backend with relative URLs: `fetch("/api/...")`. nginx (Docker/Kubernetes) and the Vite dev server both forward `/api/*` to the backend, so no CORS setup and no hard-coded addresses.
 3. Run: `npm run dev` for hot reload (section 6), or `docker compose up -d --build frontend` to test the production build.
 4. Build-time settings must start with `VITE_`; pass them as `build.args` in `docker-compose.yml`.
@@ -410,13 +432,13 @@ ran crash recovery from its write-ahead log (`automatic recovery in progress`), 
 ### Backend teammate (`backend/`)
 
 1. Keep: entrypoint `app.main:app`; `GET /health/live`; `GET /health/ready`; business routes under `/api/...` (nginx only forwards `/api/*`).
-2. Implement the real readiness check in `app/health.py` (for example `SELECT 1` through your connection pool) and keep `/health/live` independent of the database. The Kubernetes probes call exactly these two paths.
+2. `/health/ready` runs `SELECT 1` against the database; `/health/live` must stay independent of it. The Kubernetes probes call exactly these two paths.
 3. Read configuration through `app/config.py`; `get_settings().database_url` builds the connection URL from the `POSTGRES_*` variables.
 4. Add libraries to `requirements.txt`, then `docker compose up -d --build backend`. The image copies the whole `backend/` folder, so new folders (e.g. migrations) are included.
-5. Delete the placeholder `/api/ping` when real endpoints exist, and tell the frontend teammate (their placeholder page calls it).
+5. Door unlocks go through `app/locker_controller.py` (gRPC) and notifications through `app/notification_client.py`; call those modules rather than the services directly.
 6. If your app connects to the database at startup, retry for a few seconds: Compose waits for a healthy database, Kubernetes does not (a crashing pod is restarted automatically, but retrying is cleaner).
 7. API docs are at http://localhost:8000/docs (published backend port; not reachable through the frontend's `/api` proxy).
-8. Resilience (see section 8): use a connection pool that survives database restarts and has timeouts (with SQLAlchemy: `pool_pre_ping=True`, a pool timeout and a connect timeout), return HTTP 503 rather than crashing when the database is down, and make commands such as "open locker" idempotent so retries are safe.
+8. Resilience (see section 8): database connection errors already become HTTP 503 (`database_unavailable_handler` in `main.py`); keep slow external calls, like the gRPC unlock, outside the allocation lock, and make commands idempotent so retries are safe.
 
 ### Database teammate (`database/`)
 
@@ -453,6 +475,11 @@ ran crash recovery from its write-ahead log (`automatic recovery in progress`), 
 | `locker-db-*` pods or PVCs `Pending` | No default StorageClass (`kubectl get storageclass`) or not enough memory/CPU in the cluster: `kubectl -n smart-locker describe pod locker-db-1`. Give minikube `--cpus 4 --memory 6144`. |
 | `kubectl get hpa` shows `cpu: <unknown>/60%` | metrics-server is missing or still starting. `make k8s-addons`, wait a minute. |
 | Unlocking a locker returns 503 "locker controller is not responding" | The gRPC controller is down or scaled to 0: `kubectl -n smart-locker get pods -l app=locker-controller`. |
+| The notification badge never updates, or `/api/notifications` returns 503 | The notification service is down: `kubectl -n smart-locker get pods -l app=notification-service` (Compose: `docker compose ps notification-service`). |
+| Testing System buttons are greyed out with "Demo actions are switched off" | Run `make k8s-demo-on`. On Docker Compose these buttons never work; the live views still do. |
+| Grafana panels in the dashboard say they need Prometheus and Grafana | On Compose start them with `docker compose --profile monitoring up -d`; on Kubernetes check `kubectl -n smart-locker get pods -l app=grafana`. |
+| The Stress Test run report says "No report for that run" | Reports are built from the k6 job's log, which Kubernetes keeps for a day. Older runs still show their stored report. |
+| Assign Parcels lists hundreds of `load…` or `e2e-…` users | Test runs create throwaway accounts: `make k8s-cleanup-users` (or `make cleanup-users` on Compose). |
 | Changed the password but the database still uses the old one | The cluster reads the password when it is first created. To start fresh: `kubectl -n smart-locker delete cluster locker-db`, re-run `create-secret.sh`, then `kubectl apply -k .`. This deletes the data. |
 | Code changes do not appear | Rebuild, reload the image into the cluster, then `rollout restart` (see "After you change code"). |
 | `port-forward` fails: address in use | Choose another local port, e.g. `8081:80`. |
@@ -462,16 +489,14 @@ ran crash recovery from its write-ahead log (`automatic recovery in progress`), 
 
 ## 11. Test status and first-run checklist
 
-This scaffold was first assembled in a sandbox where Docker Hub was blocked by network policy, so the
-container images could not be built or started there and no Kubernetes cluster was available. Static
-checks were done in that sandbox; the rest was later run on a real machine with Docker Desktop and a
-local Kubernetes cluster ([cluster type], 2026-11-15).
+The infrastructure was first checked statically, then run on Docker Desktop and minikube
+(2026-11-15 to 2026-11-20), and the CI pipeline runs it on a 3-node kind cluster for every pull request.
 
 | Item | Result |
 |---|---|
 | `docker compose config` (YAML, variable substitution, required-variable errors) | Verified: clear error without `.env`, correct resolved config with it |
-| Placeholder backend run natively: `/health/live`, `/health/ready`, `/api/ping` | Verified: liveness stays 200 with the database down; readiness is 503 without and 200 with a reachable database; no credentials in responses |
-| Placeholder frontend: `npm install`, `npm run build`; dev server proxying `/api` to the backend | Verified |
+| Health endpoints: liveness stays 200 with the database down; readiness is 503 without and 200 with a reachable database | Verified |
+| Frontend: `npm run build` in the Docker image; dev server proxying `/api` to the backend | Verified |
 | nginx config syntax (rendered with `BACKEND_URL`) | Verified with a static parser |
 | nginx template substitution by the official image (`envsubst`) | Verified in Kubernetes: the frontend pods start with the rendered config and pass their `/healthz` probe |
 | Kubernetes manifests: schema validation (strict) against Kubernetes 1.29, 1.31 and 1.37 | Verified |
@@ -479,27 +504,57 @@ local Kubernetes cluster ([cluster type], 2026-11-15).
 | `kubernetes/create-secret.sh` logic (missing file, empty password, CRLF files, only credential keys stored) | Verified with a stand-in `kubectl`; the Secret is also in use by the running cluster |
 | `make env`, Makefile dry runs | Verified |
 | `docker build` of the frontend and backend images | Verified on Docker Desktop (the images run in the Kubernetes pods) |
-| `docker compose up` end to end (healthy containers, database volume persistence, nginx `/api` proxy in the container, the web page at :3000) | **To confirm** with the first-run checklist below (steps 2 to 4) |
-| `kubectl apply -k` on a cluster, probes, 2 running backend replicas, 2 frontend replicas, PVC binding | Verified on [cluster type], 2026-11-15 |
-| Loading images into the cluster | Verified for [cluster type]; the minikube and kind commands are the standard ones and not verified |
-| Failure demonstrations (section 8): pod deleted, container crashed, rolling restart, database scaled to zero and back, database pod deleted with data intact | Verified on [cluster type], 2026-11-15 |
+| `docker compose up` end to end (healthy containers, database volume persistence, nginx `/api` proxy, the app at :3000) | Verified on Docker Desktop, 2026-11-19 |
+| `kubectl apply -k` on a cluster, probes, replicas, volumes | Verified on minikube, 2026-11-15 and 2026-11-19 |
+| Loading images into the cluster | Verified for minikube (`make k8s-images`) and kind (CI) |
+| Failure demonstrations (section 8) | Verified on minikube, 2026-11-15 and 2026-11-19 |
 | Compose restart policy (`docker compose exec backend sh -c 'kill 1'`, then `docker compose ps`) | **Not yet verified** |
 | Compose with the gRPC controller and the monitoring profile: `tests/test_end_to_end.py` (parcel and luggage unlocks over gRPC, concurrency, metrics), controller stopped (unlock 503 in 3 s, booking still works, luggage claim rolled back), `--scale locker-controller=2` (calls alternate between replicas), `CONTROLLER_FAILURE_RATE=0.4` (all unlocks succeed through retries), Prometheus targets and Grafana dashboard | Verified on Docker Desktop, 2026-11-19 |
 | Kubernetes (minikube 1.39, Kubernetes 1.37, single node): add-ons script, CloudNativePG cluster + pooler, `tests/test_end_to_end.py` through the pooler, gRPC round-robin across 2 controller pods, Prometheus discovery of all pods incl. database roles, Grafana dashboard | Verified, 2026-11-19 |
 | Database failover under traffic (primary deleted): about 2 s of failed requests, then a replica is primary and the tests pass | Verified on minikube, 2026-11-19 |
 | Autoscaling: k6 job with 40 users, HPA 2 -> 4 -> 6 pods, back down after the test; 23,268 requests, 0 failures, p95 171 ms | Verified on minikube, 2026-11-19 |
 | Rolling restart of locker-controller under gRPC traffic: 0 of 756 calls failed | Verified on minikube, 2026-11-19 |
-| CI workflow (`.github/workflows/ci.yml`) | Lint-clean (actionlint). **Not yet run on GitHub**; the kind-specific steps (image loading into kind, metrics-server manifest) have not been run locally |
+| Notification service: send, list, mark as read, ownership check, live stream through nginx (about 33 ms), a 1-minute luggage reminder arriving over the stream, working again after a database failover | Verified on Docker Desktop and minikube, 2026-11-19 |
+| Stress Test with all load and chaos on the test lockers, a normal user's journey at a real station during it, real lockers unchanged, test lockers freed afterwards | Verified on minikube, 2026-11-19 |
+| Run reports: SLO scorecard, journey success, no compartment held twice, no completed journey missing from the database | Verified on minikube, 2026-11-20 |
+| `make k8s-cleanup-users`: 277 test accounts and their data removed in one transaction, `admin` and `jane` kept | Verified on minikube, 2026-11-20 |
+| CI workflow (`.github/workflows/ci.yml`) | Passed on GitHub for PR #9: Compose job and the kind job (deploy, tests, database failover, tests again) |
 
 **First-run checklist for the first teammate with Docker (about 10 minutes):**
 
 1. `cp .env.example .env`, set a password, `docker compose up --build`.
 2. `docker compose ps`: `postgres`, `backend`, `locker-controller`, `frontend` all `healthy`.
-3. http://localhost:3000 shows "Backend reachable" and "Database reachable".
+3. http://localhost:3000 shows the sign-in page; `admin` / `Admin@12345` opens the admin dashboard.
 4. `docker compose down` then `up -d`: the database volume still exists (`docker volume ls` shows `smart-locker_postgres_data`).
 5. Kubernetes: follow section 7; expect the pods listed in step 5 there and the same page via port-forward.
 6. Fix anything that differs from the above and note it here, so the README stays accurate.
 
+
+## 12. Admin dashboard: system tests
+
+Sign in as an administrator and open **Testing System**. Each card shows live state from the
+backend, Prometheus and the Kubernetes API, with the matching Grafana panels embedded:
+
+| Card | What it shows and runs |
+|---|---|
+| Stress Test | Tick any mix of load (browse and sign in, parcel journeys, luggage sessions, book-and-cancel churn) and chaos (40% controller faults, a controller outage, killing the database primary), pick an intensity and length, and start it. It runs real bookings, gRPC door unlocks and luggage sessions on **Stress Test Bay**: 14 test lockers that users, Locker Status and the metrics never see, used only by throwaway `stress-` accounts. A live console shows each journey, chaos step and retry; the test lockers are freed when the run ends. |
+| Concurrency Test | Many bookings at once against real stations: every compartment is given out exactly once. |
+| Load Balancing | Which backend pods answer HTTP requests and which controller pods answer gRPC calls. |
+| Scalability | The autoscaler: pods, CPU against its target, requests per second, latency; starts a browse-only load test. |
+| Fault Tolerance | Kill the database primary, stop and start the controller, inject controller faults. |
+
+The buttons that change the cluster need `make k8s-demo-on` and only work on Kubernetes.
+
+**Run reports.** When a stress run finishes, the page builds a report from three sources: k6 (what users
+saw), Prometheus (what the servers saw) and the database (no compartment ever held by two bookings,
+no completed journey missing). It scores the run against SLOs, such as availability outside chaos, outage
+per chaos event, recovery time and journey success, and keeps every report so runs can be compared and
+downloaded as Markdown or CSV. The targets are `SLOS` in `backend/app/demo.py`. [CLOUD.md](CLOUD.md) explains
+each measure.
+
+**Test accounts.** Stress tests, load tests and the API tests create throwaway users. Before a demo,
+`make k8s-cleanup-users` (or `make cleanup-users`) deletes every account except `admin` and `jane`,
+with their parcels, bookings and luggage.
 
 ## Luggage and admin demo workflows
 
@@ -523,8 +578,8 @@ Databases created before this change need `database/migrations/001-assigned-parc
 
 The web app opens at a shared login page at `http://localhost:3000`. Sign in with either a normal user account or the seeded administrator account; the database role determines which dashboard appears. User accounts can be registered there; new registrations always receive the `USER` role. `database/init/02-seed.sql` creates the default administrator; if `ADMIN_USERNAME` names a different account, the backend creates that one on startup.
 
-- Default username: `admin`
-- Default password: `Admin@12345`
+- Default administrator: `admin` / `Admin@12345`
+- Sample user with two assigned parcels: `jane` / `janedoe123`
 
 Set `ADMIN_USERNAME` and `ADMIN_INITIAL_PASSWORD` in `.env` before starting the backend to use different initial credentials. The password must be 10-128 characters. Once the account exists, changing the environment password does not reset its stored password; change it through a password-management feature or a controlled database operation. Do not use the demo default in a deployed environment.
 
