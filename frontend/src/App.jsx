@@ -3,6 +3,9 @@ import LuggagePortal from "./LuggagePortal.jsx";
 import { useCallback, useEffect, useState } from "react";
 import "./index.css";
 import NotificationViewer from './NotificationViewer.jsx';
+import useNotifications from './useNotifications';
+
+// near your other hooks; use whatever variable holds the access token
 
 // In Docker/Kubernetes nginx forwards /api/* to FastAPI.
 const API = import.meta.env.VITE_API_BASE_URL ?? "/api";
@@ -100,6 +103,8 @@ export default function App() {
   const [collectionOk, setCollectionOk] = useState(false);
   const [loadingParcels, setLoadingParcels] = useState(false);
   const [unlockingParcel, setUnlockingParcel] = useState(false);
+
+  const { notifications, unreadCount, markRead, reload } = useNotifications(accessToken);
 
   const loadStations = useCallback(async () => {
     try {
@@ -200,6 +205,11 @@ export default function App() {
   function goTo(next) {
     setError("");
     setScreen(next);
+    if (next === "notifications") {
+      notifications
+          .filter((n) => !n.read)
+          .forEach((n) => markRead(n.id));
+    }
     if (next === "myparcels") {
       setBookingParcel(null);
       setStation("");
@@ -539,6 +549,42 @@ export default function App() {
             </span>
           </div>
           <div className="user-session">
+            <span style={{ position: 'relative', display: 'inline-flex' }}>
+              <button
+                type="button"
+                className="notification-shortcut"
+                onClick={() => goTo("notifications")}
+                aria-label={unreadCount > 0 ? `Open notifications (${unreadCount} unread)` : 'Open notifications'}
+                title="Notifications"
+                style={{ /* your existing styles, unchanged */ }}
+              >
+                <span aria-hidden="true">🔔</span>
+              </button>
+              {unreadCount > 0 && (
+                <span
+                  aria-hidden="true"
+                  style={{
+                    position: 'absolute',
+                    top: '-4px',
+                    right: '-4px',
+                    minWidth: '18px',
+                    height: '18px',
+                    padding: '0 5px',
+                    boxSizing: 'border-box',
+                    borderRadius: '9px',
+                    background: '#e5484d',
+                    color: '#fff',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    lineHeight: '18px',
+                    textAlign: 'center',
+                    pointerEvents: 'none',
+                  }}
+                >
+                  {unreadCount > 99 ? '99+' : unreadCount}
+                </span>
+              )}
+            </span>
             <span>
               Signed in as <strong>{account.username}</strong>
             </span>
@@ -604,6 +650,9 @@ export default function App() {
             accessToken={accessToken}
             account={account}
             onBack={() => goTo("choose")}
+            notifications={notifications}
+            markRead={markRead}
+            reload={reload} 
           />
         )}
 

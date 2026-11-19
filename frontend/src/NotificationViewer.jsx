@@ -212,7 +212,7 @@ export default function NotificationViewer({ accessToken, account, onBack }) {
               ))}
             </ul>}
         </section>
-
+{/*
         <div className="notif-col">
           <form className="panel" onSubmit={send}>
             <h2>Send a notification</h2>

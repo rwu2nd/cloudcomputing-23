@@ -1,46 +1,55 @@
 """HTTP bridge: browser <-> FastAPI <-> gRPC notification-service.
 
 Mount with:  app.include_router(notifications_api.router)
-Adapt `current_user` to whatever dependency your /luggage/auth/me uses.
-If backend/notification-client already wraps the stub, swap it in for
-`_stub()` below.
+
+Unary calls (send / list / mark-read / reminder delivery) go through
+notification_client (sync gRPC, run in a worker thread so the event loop
+isn't blocked). Only the server-streaming SSE endpoint talks to gRPC directly,
+because the client module doesn't wrap StreamNotifications.
 """
 import asyncio
 import json
+import logging
 import os
-import sys
-from typing import Literal
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Literal
 
 import grpc
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+from app import notification_client  # adjust the import path if yours differs
 from app.luggage import _current_user
 
-# Same runtime proto loading as the server (proto dir must exist in the backend image).
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "proto"))
-pb2 = grpc.protos("notification.proto")
-pb2_grpc = grpc.services("notification.proto")
+# Reuse the proto modules already loaded by notification_client, so the proto
+# is only loaded (and its path only configured) in one place.
+pb2 = notification_client.pb2
+pb2_grpc = notification_client.pb2_grpc
 
-GRPC_TARGET = os.getenv("NOTIFICATION_GRPC_TARGET", "notification-service:50051")
+# Same env var the client uses, so both always point at the same service.
+GRPC_TARGET = os.getenv("NOTIFICATION_SERVICE_URL", "notification-service:50051")
+MAX_REMINDER_MINUTES = 7 * 24 * 60
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 _channel = None
 
 
 def _stub():
+    """Async stub, used only for the streaming RPC."""
     global _channel
     if _channel is None:
         _channel = grpc.aio.insecure_channel(GRPC_TARGET)
     return pb2_grpc.NotificationServiceStub(_channel)
 
 
-
 async def current_user(account=Depends(_current_user)):
     # your dependency returns a dict; expose it with attribute access
     return SimpleNamespace(**account)
+
 
 def _to_dict(n):
     return {
@@ -54,7 +63,7 @@ def _to_dict(n):
     }
 
 
-def _http_error(e: grpc.aio.AioRpcError):
+def _http_error(e: grpc.RpcError):
     code = {
         grpc.StatusCode.INVALID_ARGUMENT: 400,
         grpc.StatusCode.NOT_FOUND: 404,
@@ -63,6 +72,9 @@ def _http_error(e: grpc.aio.AioRpcError):
     return HTTPException(code, e.details() or "notification service error")
 
 
+# --------------------------------------------------------------------------
+# Send / list / mark read
+# --------------------------------------------------------------------------
 class SendBody(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     message: str = ""
@@ -73,18 +85,12 @@ class SendBody(BaseModel):
 async def send(body: SendBody, user=Depends(current_user)):
     # user_id always comes from the token, never from the client.
     try:
-        res = await _stub().SendNotification(
-            pb2.SendNotificationRequest(
-                user_id=user.username,
-                title=body.title,
-                message=body.message,
-                type=pb2.NotificationType.Value(body.type),
-            ),
-            timeout=5,
+        return await asyncio.to_thread(
+            notification_client.send_notification,
+            user.username, body.title, body.message, body.type,
         )
-    except grpc.aio.AioRpcError as e:
+    except grpc.RpcError as e:
         raise _http_error(e)
-    return {"success": res.success, "notification": _to_dict(res.notification)}
 
 
 @router.get("")
@@ -94,32 +100,104 @@ async def list_notifications(
     user=Depends(current_user),
 ):
     try:
-        res = await _stub().ListNotifications(
-            pb2.ListNotificationsRequest(
-                user_id=user.username, unread_only=unread_only, limit=limit
-            ),
-            timeout=5,
+        return await asyncio.to_thread(
+            notification_client.list_notifications, user.username, unread_only, limit
         )
-    except grpc.aio.AioRpcError as e:
+    except grpc.RpcError as e:
         raise _http_error(e)
-    return {"notifications": [_to_dict(n) for n in res.notifications], "total": res.total}
 
 
 @router.post("/{notification_id}/read")
 async def mark_read(notification_id: str, user=Depends(current_user)):
     # MarkAsRead has no user_id, so verify ownership before calling it.
     try:
-        owned = await _stub().ListNotifications(
-            pb2.ListNotificationsRequest(user_id=user.username, limit=100), timeout=5
+        owned = await asyncio.to_thread(
+            notification_client.list_notifications, user.username, False, 100
         )
-        if notification_id not in {n.id for n in owned.notifications}:
+        if notification_id not in {n["id"] for n in owned.get("notifications", [])}:
             raise HTTPException(404, "notification not found")
-        res = await _stub().MarkAsRead(pb2.MarkAsReadRequest(id=notification_id), timeout=5)
-    except grpc.aio.AioRpcError as e:
+        return await asyncio.to_thread(notification_client.mark_as_read, notification_id)
+    except grpc.RpcError as e:
         raise _http_error(e)
-    return {"success": res.success}
 
 
+# --------------------------------------------------------------------------
+# Luggage reminders: "remind me in X minutes/hours"
+#
+# The delay is held server-side, so the reminder fires even if the browser tab
+# is closed; when it fires it goes out through the notification service and
+# reaches the page over the SSE stream below (or shows up in the unread list
+# next time the page loads).
+#
+# NOTE: pending reminders live in this process's memory, so they are lost if
+# the backend restarts and are not shared between multiple backend workers.
+# For anything stronger, persist them in your DB and run a scheduler.
+# --------------------------------------------------------------------------
+_reminders: dict[tuple[str, str], tuple[datetime, asyncio.Task]] = {}
+
+
+class ReminderBody(BaseModel):
+    session_id: int | str  # accepts numeric ids or string/UUID ids
+    minutes: int = Field(ge=1, le=MAX_REMINDER_MINUTES)
+    label: str = Field(default="", max_length=100)
+
+
+async def _fire_reminder(key: tuple[str, str], delay_seconds: float, label: str):
+    try:
+        await asyncio.sleep(delay_seconds)
+        where = f" ({label})" if label else ""
+        await asyncio.to_thread(
+            notification_client.send_notification,
+            key[0],
+            "Luggage reminder",
+            f"Time to retrieve your luggage{where}.",
+            "INFO",
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("failed to deliver luggage reminder for %s", key)
+    finally:
+        entry = _reminders.get(key)
+        if entry and entry[1] is asyncio.current_task():
+            _reminders.pop(key, None)
+
+
+@router.post("/reminders")
+async def set_reminder(body: ReminderBody, user=Depends(current_user)):
+    key = (user.username, str(body.session_id))
+    old = _reminders.pop(key, None)
+    if old:
+        old[1].cancel()  # one reminder per session; the new one replaces it
+
+    due_at = datetime.now(timezone.utc) + timedelta(minutes=body.minutes)
+    task = asyncio.create_task(_fire_reminder(key, body.minutes * 60, body.label))
+    _reminders[key] = (due_at, task)
+    return {"session_id": body.session_id, "due_at": due_at.isoformat()}
+
+
+@router.get("/reminders")
+async def list_reminders(user=Depends(current_user)):
+    return {
+        "reminders": [
+            {"session_id": sid, "due_at": due.isoformat()}
+            for (username, sid), (due, _task) in _reminders.items()
+            if username == user.username
+        ]
+    }
+
+
+@router.delete("/reminders/{session_id}")
+async def cancel_reminder(session_id: str, user=Depends(current_user)):
+    entry = _reminders.pop((user.username, session_id), None)
+    if entry:
+        entry[1].cancel()
+    return {"success": entry is not None}
+
+
+# --------------------------------------------------------------------------
+# Live stream
+# --------------------------------------------------------------------------
 @router.get("/stream")
 async def stream(user=Depends(current_user)):
     """Server-sent events fed by the StreamNotifications server-streaming RPC."""
