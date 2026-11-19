@@ -46,6 +46,7 @@ smart-locker-system/
 ├── CLOUD.md                  # cloud concepts, architecture and demo script
 ├── proto/                    # gRPC contract (locker_controller.proto), shared by backend and controller
 ├── locker-controller/        # gRPC service: simulated door hardware
+├── notification-service/     # gRPC service: notifications, streamed to the browser
 ├── monitoring/               # Prometheus scrape configs + Grafana dashboard (used by Compose and Kubernetes)
 ├── tests/                    # pytest API tests (test_end_to_end.py runs against Compose or Kubernetes)
 ├── .github/workflows/ci.yml  # CI/CD pipeline
@@ -69,6 +70,7 @@ smart-locker-system/
     ├── database/             # CloudNativePG Cluster (3 instances) + PgBouncer Pooler
     ├── backend/              # deployment.yaml, service.yaml, hpa.yaml (2-6 pods), pdb.yaml
     ├── locker-controller/    # deployment.yaml (gRPC probes), headless service.yaml, pdb.yaml
+    ├── notification-service/ # deployment.yaml (1 replica, see comment), service.yaml
     ├── frontend/             # deployment.yaml (2 replicas + probes), service.yaml, pdb.yaml
     ├── monitoring/           # prometheus.yaml, grafana.yaml
     ├── loadtest/             # k6 load test Job (`make k8s-loadtest`)

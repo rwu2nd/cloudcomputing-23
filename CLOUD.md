@@ -12,7 +12,10 @@ lives in the code, and how to demonstrate them. Setup instructions are in the [R
  Browser ── REST/JSON ──►│ frontend (nginx, 2 pods)                                    │
                          │    │ /api/*                                                 │
                          │    ▼                                                        │
-                         │ backend (FastAPI, 2-6 pods, autoscaled) ── gRPC ──► locker-controller
+                         │ backend (FastAPI, 2-6 pods, autoscaled) ── gRPC ──► notification-service (1 pod)
+                         │    │      ▲ server-sent events      ◄── gRPC stream ──┘  (StreamNotifications)
+                         │    │                                                        │
+                         │ backend ─────────────────────────────── gRPC ──► locker-controller
                          │    │                                    (round robin,   (2 pods, simulated
                          │    │                                     retries,        door hardware)
                          │    ▼                                     deadlines)                │
@@ -35,7 +38,7 @@ handy for development. Kubernetes adds the replication, autoscaling and self-hea
 |---|---|---|
 | Containers | Every service is an image built from a Dockerfile; the same images run in Compose and Kubernetes | `docker/` |
 | Orchestration, declarative config | Kubernetes Deployments, Services, ConfigMaps and Secrets, applied with one `kubectl apply -k .` | `kustomization.yaml`, `kubernetes/` |
-| Microservices, RPC | The backend calls a separate locker-controller service over **gRPC** with a typed contract | `proto/`, `locker-controller/`, `backend/app/locker_controller.py` |
+| Microservices, RPC | The backend talks to two separate services over **gRPC** with typed contracts: the locker-controller (unary door unlocks with deadlines and retries) and the notification service (unary send/list/mark-read, plus a **server-streaming** call that pushes new notifications, forwarded to the browser as server-sent events) | `proto/`, `locker-controller/`, `notification-service/`, `backend/app/locker_controller.py`, `backend/app/notifications_api.py` |
 | Service discovery, load balancing | HTTP traffic is balanced by Kubernetes Services. gRPC uses a **headless Service** so the client sees every controller pod and balances calls itself (`round_robin`) | `kubernetes/locker-controller/service.yaml` |
 | Elasticity (autoscaling) | A HorizontalPodAutoscaler adds backend pods (2 to 6) when CPU passes 60% of the request and removes them afterwards. This works because the backend is stateless: sessions and queues live in PostgreSQL | `kubernetes/backend/hpa.yaml` |
 | High availability, failover | PostgreSQL runs as 1 primary + 2 streaming replicas. If the primary dies, CloudNativePG promotes a replica and the `-rw` Service follows it | `kubernetes/database/cluster.yaml` |
@@ -66,6 +69,9 @@ gRPC, the usual "REST at the edge, gRPC inside" split. gRPC fits here because:
 - **There is a standard health protocol.** `grpc.health.v1` is used by Kubernetes probes and by the
   client to skip pods that are shutting down.
 - **Calls are cheap.** One long-lived HTTP/2 connection per pod carries many calls; messages are compact protobuf.
+- **It can stream.** The notification service's `StreamNotifications` keeps one call open and pushes each
+  new notification (for example a luggage "remind me" reminder) the moment it is stored; the backend
+  turns that into server-sent events for the browser. REST has no equivalent; it would have to poll.
 
 What happens when a user taps **Unlock locker**:
 
