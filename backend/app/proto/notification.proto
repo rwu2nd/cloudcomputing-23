@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package notifications;
+
+service NotificationService {
+  rpc SendNotification (SendNotificationRequest) returns (SendNotificationResponse);
+  rpc ListNotifications (ListNotificationsRequest) returns (ListNotificationsResponse);
+  rpc MarkAsRead (MarkAsReadRequest) returns (MarkAsReadResponse);
+  rpc StreamNotifications (StreamNotificationsRequest) returns (stream Notification);
+}
+
+enum NotificationType {
+  INFO = 0;
+  SUCCESS = 1;
+  WARNING = 2;
+  ERROR = 3;
+}
+
+message Notification {
+  string id = 1;
+  string user_id = 2;
+  string title = 3;
+  string message = 4;
+  NotificationType type = 5;
+  bool is_read = 6;
+  string created_at = 7;
+}
+
+message SendNotificationRequest {
+  string user_id = 1;
+  string title = 2;
+  string message = 3;
+  NotificationType type = 4;
+}
+
+message SendNotificationResponse {
+  bool success = 1;
+  Notification notification = 2;
+}
+
+message ListNotificationsRequest {
+  string user_id = 1;
+  bool unread_only = 2;
+  int32 limit = 3;
+}
+
+message ListNotificationsResponse {
+  repeated Notification notifications = 1;
+  int32 total = 2;
+}
+
+message MarkAsReadRequest {
+  string id = 1;
+}
+
+message MarkAsReadResponse {
+  bool success = 1;
+}
+
+message StreamNotificationsRequest {
+  string user_id = 1;
+}

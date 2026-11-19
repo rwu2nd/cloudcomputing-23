@@ -4,5 +4,9 @@ fastapi==0.143.2
 uvicorn[standard]==0.54.0
 psycopg2-binary>=2.9.9,<3
 grpcio==1.85.1
+# grpcio-tools is needed at runtime: notification_client.py loads
+# notification.proto with grpc.protos(). Same version as grpcio, and the
+# protobuf 7 runtime the generated locker-controller stubs need.
+grpcio-tools==1.85.1
 protobuf==7.36.2
 prometheus-client==0.26.0

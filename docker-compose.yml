@@ -127,6 +127,26 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+  # gRPC notification service (Sara): stores notifications and streams new ones
+  # to the backend, which forwards them to the browser over server-sent events.
+  notification-service:
+    build: ./notification-service
+    image: smart-locker-notifications:local
+    restart: unless-stopped
+    environment:
+      GRPC_PORT: 50051
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DB_NAME: ${POSTGRES_DB:-postgres}
+    ports:
+      # optional: only needed to use grpcurl from your machine
+      - "127.0.0.1:${NOTIFICATION_HOST_PORT:-50051}:50051"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # ---- Monitoring (only with: docker compose --profile monitoring up -d) ----
   prometheus:
     image: prom/prometheus:v3.15.1

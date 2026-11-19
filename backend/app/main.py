@@ -51,6 +51,8 @@ from app.luggage import (
     STRESS_ZONE,
 )
 
+from app import notifications_api
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -61,6 +63,7 @@ app = FastAPI(
 app.include_router(health_router)
 app.include_router(luggage_router)
 app.include_router(demo_router)
+app.include_router(notifications_api.router, prefix="/api")
 setup_metrics(app)
 
 
