@@ -3,3 +3,5 @@
 fastapi==0.143.2
 uvicorn[standard]==0.54.0
 psycopg2-binary>=2.9.9,<3
+grpcio==1.85.1
+protobuf==7.36.2

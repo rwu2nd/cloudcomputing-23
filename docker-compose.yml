@@ -20,6 +20,7 @@ x-db-settings: &db-settings
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped 
     environment:
       <<: *db-settings
     ports:
@@ -31,6 +32,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       # Optional init scripts (*.sql, *.sh). They run ONCE, when the volume is empty.
       # The schema belongs to the database teammate: see database/README.md.
+      # - ./database/init:/docker-entrypoint-initdb.d:ro
       - ./database/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
@@ -45,9 +47,14 @@ services:
       dockerfile: docker/backend.Dockerfile
     # Same tag the Kubernetes manifests use, so one build serves both.
     image: smart-locker-backend:local
+    restart: unless-stopped 
     environment:
       <<: *db-settings
       APP_ENV: ${APP_ENV:-development}
+      LUGGAGE_DEMO_MODE: ${LUGGAGE_DEMO_MODE:-true}
+      LUGGAGE_AUTH_TTL_HOURS: ${LUGGAGE_AUTH_TTL_HOURS:-12}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-Admin@12345}
       # Service name on the Compose network (the Kubernetes Service is also called "postgres").
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
@@ -71,6 +78,7 @@ services:
       context: .
       dockerfile: docker/frontend.Dockerfile
     image: smart-locker-frontend:local
+    restart: unless-stopped 
     environment:
       # nginx forwards /api/* to this URL (no trailing slash).
       BACKEND_URL: http://backend:8000
@@ -89,6 +97,5 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-
 volumes:
   postgres_data:
