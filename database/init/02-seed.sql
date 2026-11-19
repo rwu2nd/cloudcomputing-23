@@ -59,3 +59,36 @@ VALUES
         'USER'
     )
 ON CONFLICT (username) DO NOTHING;
+
+-- =========================================
+-- 4. Assign sample parcels to Jane
+-- =========================================
+
+INSERT INTO parcels
+    (id, user_id, size, description, assigned_by)
+SELECT
+    v.id,
+    jane.id,
+    v.size,
+    v.description,
+    admin.id
+FROM public."user" jane
+CROSS JOIN public."user" admin
+CROSS JOIN (
+    VALUES
+        (
+            'a1000000-0000-4000-8000-000000000001'::UUID,
+            'M',
+            'Medium parcel - Sample parcel 1'
+        ),
+        (
+            'a1000000-0000-4000-8000-000000000002'::UUID,
+            'L',
+            'Large parcel - Sample parcel 2'
+        )
+) AS v(id, size, description)
+WHERE jane.username = 'jane'
+  AND jane.role = 'USER'
+  AND admin.username = 'admin'
+  AND admin.role = 'ADMIN'
+ON CONFLICT (id) DO NOTHING;
