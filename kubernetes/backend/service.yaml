@@ -1,4 +1,4 @@
-# Internal address of the backend: http://backend:8000 (load-balanced over the 2 replicas).
+# Internal address of the backend: http://backend:8000 (load-balanced over all replicas).
 apiVersion: v1
 kind: Service
 metadata:

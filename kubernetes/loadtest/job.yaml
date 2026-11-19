@@ -1,0 +1,42 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6-load-test
+  namespace: smart-locker
+  labels:
+    app: k6
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 1800
+  template:
+    metadata:
+      labels:
+        app: k6
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: k6
+          image: grafana/k6:1.8.2
+          args: ["run", "--no-usage-report", "/scripts/smart-locker.js"]
+          env:
+            - name: BASE_URL
+              value: http://frontend.smart-locker.svc.cluster.local
+            # Peak number of simulated users and how long to hold the peak.
+            - name: PEAK_USERS
+              value: "40"
+            - name: HOLD
+              value: 2m
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+          resources:
+            requests:
+              cpu: 200m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: scripts
+          configMap:
+            name: k6-script

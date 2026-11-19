@@ -1,0 +1,83 @@
+# PostgreSQL as a replicated, self-healing cluster, run by the CloudNativePG
+# operator (installed once per cluster by kubernetes/addons/install.sh).
+#
+# What this gives over a single postgres pod:
+#   * 3 instances: 1 primary + 2 streaming replicas, each with its own volume.
+#   * Automatic failover: if the primary dies, the most up-to-date replica is
+#     promoted within seconds and the locker-db-rw Service follows it.
+#   * Replicas are spread over different nodes when the cluster has several.
+#
+# Services the operator creates:
+#   locker-db-rw  always points at the current primary (read/write)
+#   locker-db-ro  replicas only (read-only queries)
+#   locker-db-r   any instance
+# The backend does not connect here directly; it goes through the PgBouncer
+# pooler in pooler.yaml.
+#
+# Try a failover:
+#   kubectl -n smart-locker get cluster locker-db            # shows the primary
+#   kubectl -n smart-locker delete pod <primary pod>
+#   kubectl -n smart-locker get pods -l cnpg.io/cluster=locker-db -L role -w
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: locker-db
+  namespace: smart-locker
+spec:
+  instances: 3
+  # PostgreSQL 16, the same major version as docker-compose.yml.
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.14-standard-trixie
+  primaryUpdateStrategy: unsupervised
+
+  # How long a stopping primary waits for clients to disconnect before it
+  # forces them off. The default (180s) is far too long here: the PgBouncer
+  # pooler keeps its server connections open, so a deleted primary would hang
+  # in "smart shutdown" and block the failover for three minutes. 5s, then a
+  # fast shutdown, lets a replica take over within seconds.
+  smartShutdownTimeout: 5
+  stopDelay: 60
+  switchoverDelay: 60
+
+  postgresql:
+    parameters:
+      max_connections: "200"
+
+  storage:
+    size: 1Gi
+
+  # Runs once, when the cluster is first created: creates locker_db owned by
+  # locker_user (password from the locker-db-app Secret, made by
+  # kubernetes/create-secret.sh), then loads the same schema and seed files
+  # that Docker Compose uses (database/init/).
+  bootstrap:
+    initdb:
+      database: locker_db
+      owner: locker_user
+      secret:
+        name: locker-db-app
+      postInitApplicationSQLRefs:
+        configMapRefs:
+          - name: postgres-init
+            key: 01-schema.sql
+          - name: postgres-init
+            key: 02-seed.sql
+          - name: postgres-init
+            key: 99-app-ownership.sql
+
+  affinity:
+    podAntiAffinityType: preferred
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  # Every instance runs a metrics exporter on port 9187; these annotations let
+  # Prometheus find it (see monitoring/prometheus/prometheus-k8s.yml).
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"

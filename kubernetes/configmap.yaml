@@ -13,9 +13,13 @@ data:
   APP_ENV: development
   LUGGAGE_DEMO_MODE: "true"
   LUGGAGE_AUTH_TTL_HOURS: "12"
-  # Kubernetes Service names (same names as in docker-compose.yml)
-  POSTGRES_HOST: postgres
+  # PgBouncer pooler in front of the CloudNativePG primary (kubernetes/database/).
+  # Compose uses "postgres" instead; the backend code is the same either way.
+  POSTGRES_HOST: locker-db-pooler-rw
   POSTGRES_PORT: "5432"
+  # gRPC address of the locker-controller. The Service is headless, so dns:///
+  # resolves to every controller pod and the backend balances calls itself.
+  LOCKER_CONTROLLER_ADDR: dns:///locker-controller.smart-locker.svc.cluster.local:50051
   # Keep in sync with POSTGRES_DB in your .env
   POSTGRES_DB: locker_db
   # Used by the frontend's nginx to forward /api/* (no trailing slash)

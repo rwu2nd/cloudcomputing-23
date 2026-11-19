@@ -1,0 +1,39 @@
+# Autoscaling: Kubernetes adds backend pods when average CPU use goes above
+# 60% of each pod's request (0.2 cores) and removes them when load drops.
+# Needs metrics-server (installed by kubernetes/addons/install.sh).
+#
+# Watch it work:   kubectl -n smart-locker get hpa backend -w
+# Generate load:   make k8s-loadtest
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend
+  namespace: smart-locker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 15
+    # Shorter than the 5-minute default so scale-in is visible in a demo.
+    scaleDown:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 30

@@ -1,5 +1,7 @@
-# FastAPI backend: two replicas, with readiness and liveness probes.
-# The probe URLs are implemented (as placeholders) in backend/app/health.py.
+# FastAPI backend, with readiness and liveness probes (backend/app/health.py).
+# The replica count (2-6) is managed by the HorizontalPodAutoscaler in hpa.yaml,
+# so there is deliberately no `replicas:` field here: re-applying this file
+# would otherwise reset whatever the autoscaler had chosen.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,7 +10,6 @@ metadata:
   labels:
     app: backend
 spec:
-  replicas: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -21,8 +22,29 @@ spec:
     metadata:
       labels:
         app: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
     spec:
       enableServiceLinks: false
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: backend
+      # Move pods off a dead node after 30s instead of the default 5 minutes.
+      tolerations:
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
       containers:
         - name: backend
           # Built locally (docker compose build) and loaded into the cluster:
@@ -67,12 +89,14 @@ spec:
             preStop:
               exec:
                 command: ["sleep", "5"]
+          # The HPA measures CPU against the request (0.2 cores), so keep it
+          # realistic; the limit lets a busy pod use up to one core.
           resources:
             requests:
-              cpu: 100m
+              cpu: 200m
               memory: 128Mi
             limits:
-              cpu: 500m
+              cpu: "1"
               memory: 512Mi
           securityContext:
             runAsNonRoot: true

@@ -1,21 +1,55 @@
-# Apply everything (in a safe order) with:  kubectl apply -k kubernetes/
-# The Secret is NOT listed here on purpose: create it first with
-# kubernetes/create-secret.sh (see README, "Kubernetes deployment").
+# Deploy everything from the repo root with:  kubectl apply -k .
+#
+# Before the first apply, once per cluster:
+#   sh kubernetes/addons/install.sh     # metrics-server + CloudNativePG operator
+#   sh kubernetes/create-secret.sh      # database Secrets from your .env
+# (or just `make k8s-up`, which does both and then applies this file).
+#
+# The Secrets are NOT listed here on purpose, so no credentials live in git.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: smart-locker
 resources:
   - kubernetes/namespace.yaml
   - kubernetes/configmap.yaml
-  - kubernetes/postgres/pvc.yaml
-  - kubernetes/postgres/deployment.yaml
-  - kubernetes/postgres/service.yaml
+  # PostgreSQL: 3-instance CloudNativePG cluster + PgBouncer pooler
+  - kubernetes/database/cluster.yaml
+  - kubernetes/database/pooler.yaml
+  # Backend (REST API, autoscaled 2-6 pods)
   - kubernetes/backend/deployment.yaml
   - kubernetes/backend/service.yaml
+  - kubernetes/backend/hpa.yaml
+  - kubernetes/backend/pdb.yaml
+  # Locker controller (gRPC, simulated door hardware)
+  - kubernetes/locker-controller/deployment.yaml
+  - kubernetes/locker-controller/service.yaml
+  - kubernetes/locker-controller/pdb.yaml
+  # Frontend (nginx + React)
   - kubernetes/frontend/deployment.yaml
   - kubernetes/frontend/service.yaml
+  - kubernetes/frontend/pdb.yaml
+  # Monitoring
+  - kubernetes/monitoring/prometheus.yaml
+  - kubernetes/monitoring/grafana.yaml
 configMapGenerator:
+  # Schema + seed for the database cluster's first start. Same files as Compose.
+  # No hash suffix: the Cluster resource refers to this name directly.
   - name: postgres-init
+    options:
+      disableNameSuffixHash: true
     files:
       - database/init/01-schema.sql
       - database/init/02-seed.sql
+      - kubernetes/database/99-app-ownership.sql
+  - name: prometheus-config
+    files:
+      - prometheus.yml=monitoring/prometheus/prometheus-k8s.yml
+  - name: grafana-datasources
+    files:
+      - monitoring/grafana/provisioning/datasources/prometheus.yml
+  - name: grafana-dashboard-provider
+    files:
+      - monitoring/grafana/provisioning/dashboards/dashboards.yml
+  - name: grafana-dashboards
+    files:
+      - monitoring/grafana/dashboards/smart-locker.json

@@ -1,0 +1,12 @@
+# Keep at least one controller running during voluntary disruptions
+# (node drains, cluster upgrades).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: locker-controller
+  namespace: smart-locker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: locker-controller

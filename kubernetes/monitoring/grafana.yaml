@@ -1,0 +1,89 @@
+# Grafana with the Prometheus data source and the "Smart Locker - Cloud
+# Overview" dashboard provisioned from monitoring/grafana/ (same files as Compose).
+#
+# Open it:  kubectl -n smart-locker port-forward svc/grafana 3001:3000
+#           then http://localhost:3001 (viewable without login; admin / admin to edit)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: smart-locker
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:13.0.12
+          env:
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Viewer
+            - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+              value: /var/lib/grafana/dashboards/smart-locker.json
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+          volumeMounts:
+            - name: storage
+              mountPath: /var/lib/grafana
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 472
+            allowPrivilegeEscalation: false
+      securityContext:
+        fsGroup: 472
+      volumes:
+        - name: storage
+          emptyDir: {}
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: smart-locker
+  labels:
+    app: grafana
+spec:
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

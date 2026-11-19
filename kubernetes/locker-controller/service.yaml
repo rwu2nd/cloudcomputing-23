@@ -1,0 +1,22 @@
+# Headless Service (clusterIP: None): DNS returns the IP of every ready
+# controller pod instead of one virtual IP.
+#
+# Why: gRPC keeps one long-lived HTTP/2 connection and sends every call over
+# it. Behind a normal ClusterIP, kube-proxy balances connections, not calls,
+# so all calls would stick to one pod. With a headless Service the backend's
+# gRPC client sees all pods and spreads calls itself (round_robin policy).
+apiVersion: v1
+kind: Service
+metadata:
+  name: locker-controller
+  namespace: smart-locker
+  labels:
+    app: locker-controller
+spec:
+  clusterIP: None
+  selector:
+    app: locker-controller
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc

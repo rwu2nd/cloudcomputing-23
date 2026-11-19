@@ -1,0 +1,94 @@
+# gRPC locker-controller: simulated door hardware, called by the backend.
+# Two stateless replicas. Kubernetes checks them with its built-in gRPC probe
+# (the standard grpc.health.v1 protocol), so no HTTP endpoint is needed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: locker-controller
+  namespace: smart-locker
+  labels:
+    app: locker-controller
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: locker-controller
+  template:
+    metadata:
+      labels:
+        app: locker-controller
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      enableServiceLinks: false
+      # Shutdown sequence: preStop sleep (5s, the pod keeps serving while it
+      # is removed from DNS) -> SIGTERM -> NOT_SERVING -> up to 10s of draining.
+      terminationGracePeriodSeconds: 25
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: locker-controller
+      # Move pods off a dead node after 30s instead of the default 5 minutes.
+      tolerations:
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+      containers:
+        - name: locker-controller
+          image: smart-locker-controller:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: grpc
+              containerPort: 50051
+            - name: metrics
+              containerPort: 9100
+          env:
+            - name: ACTUATION_MS
+              value: "80"
+            # Raise (e.g. to 0.3) to watch gRPC retries absorb failures:
+            #   kubectl -n smart-locker set env deployment/locker-controller FAILURE_RATE=0.3
+            - name: FAILURE_RATE
+              value: "0"
+          readinessProbe:
+            grpc:
+              port: 50051
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
