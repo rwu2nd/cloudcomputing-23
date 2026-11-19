@@ -145,6 +145,59 @@ change the cluster are disabled.
 `kubectl -n smart-locker set env deployment/locker-controller FAILURE_RATE=0.4`, and Grafana via
 `make k8s-grafana` (http://localhost:3001/grafana/).
 
+## Showing reliability: run reports
+
+Every stress run gets a **Run report** (Stress Test page, below the console; past runs are listed
+under it and can be downloaded as Markdown or CSV). It combines three independent sources, so no
+number relies on one tool:
+
+| Source | What it contributes |
+|---|---|
+| **k6** (the clients) | Requests, failures, availability and p50/p95/p99 as users saw them; timestamped console lines give per-second timings of every failure and chaos step |
+| **Prometheus** (the servers) | Requests and 5xx per phase (before / during / after chaos), latency per phase, which routes failed during each incident, backend pod count over time |
+| **PostgreSQL** | Correctness: no compartment ever held by two bookings at once (overlap check on every hold), no completed journey missing from the database, every test locker freed |
+
+What the report measures, and the reliability term it corresponds to:
+
+| Metric | Cloud reliability term |
+|---|---|
+| Share of requests that succeeded | **Availability** (an SLI); compared with an SLO such as 99.9% |
+| First to last failed request after a fault | **Downtime per incident** |
+| Fault injected to service working again | **Recovery time** (RTO / MTTR) |
+| Journeys clients saw complete vs rows in the database | **Data loss** (RPO) |
+| Which routes failed during the controller outage | **Blast radius / fault isolation** |
+| Injected controller faults vs unlock failures users saw | **Retry effectiveness** |
+| Time from load to extra pods, and peak pods | **Elasticity** |
+| Overlapping compartment holds | **Consistency under concurrency** |
+
+Each report ends with an **SLO scorecard**. The targets live in `SLOS` in `backend/app/demo.py`;
+pick them as a team and keep them fixed, so runs can be compared. Grafana's **Reliability** row shows
+the same idea live: availability over time, availability and **error budget** left over the selected
+time range (at 99.9%, one failed request in a thousand is allowed), and server errors by route.
+
+Example (stress-2eff76: medium intensity, 2 min, every load type and chaos event):
+
+| Objective | Target | Measured | |
+|---|---|---|---|
+| Availability outside chaos | ≥ 99.9% | 100% | PASS |
+| Availability during chaos | ≥ 97% | 96.02% | FAIL |
+| Outage after DB primary killed | ≤ 10 s | 5 s | PASS |
+| Unlocks working again after controller restore | ≤ 10 s | 12 s | FAIL |
+| Controller outage only affected door unlocks | yes | yes | PASS |
+| Unlock failures seen by users during 40% faults | 0 | 0 (14 faults injected) | PASS |
+| p95 latency outside chaos | ≤ 1000 ms | 85 ms | PASS |
+| Compartments ever held by two bookings | 0 | 0 of 271 holds | PASS |
+| Completed journeys missing from the database | 0 | 0 (126 parcels, 59 luggage) | PASS |
+| Test lockers still held after the run | 0 | 0 | PASS |
+
+The two FAILs are worth keeping in a write-up: they show exactly where the system is weakest under
+combined chaos, and point at the next tuning step (e.g. a faster controller readiness probe would cut
+the 12 s, which is mostly the new pods waiting to be marked ready).
+
+Keep the claims honest: these are short runs on one laptop. Say "availability during the test" and
+"downtime per failure", not monthly uptime. Database replication is asynchronous, so "0 journeys lost"
+is what was measured, not a guarantee (CloudNativePG can be switched to synchronous replication).
+
 ## Measured results
 
 Measured on 2026-11-19 on a laptop (minikube 1.39, Kubernetes 1.37, single node, 6 CPUs / 6 GB).
