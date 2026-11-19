@@ -61,16 +61,28 @@ class BusinessCollector:
                 # SET LOCAL (not a connection option) so this also works
                 # through PgBouncer in transaction-pooling mode.
                 cur.execute("SET LOCAL statement_timeout = 2000")
-                cur.execute("SELECT status, count(*) FROM locker_reservations GROUP BY status")
+                # The stress-test station (zone STRESS_TEST) is left out so
+                # these numbers only describe the real lockers.
+                cur.execute(
+                    """SELECT r.status, count(*) FROM locker_reservations r
+                       JOIN locker s ON s.id = r.station_id
+                       WHERE s.zone <> 'STRESS_TEST' GROUP BY r.status"""
+                )
                 for status, count in cur.fetchall():
                     reservations.add_metric([status], count)
                 cur.execute(
-                    """SELECT size, CASE WHEN reserved_by IS NULL THEN 'free' ELSE 'occupied' END, count(*)
-                       FROM locker_compartments WHERE active GROUP BY 1, 2"""
+                    """SELECT c.size, CASE WHEN c.reserved_by IS NULL THEN 'free' ELSE 'occupied' END, count(*)
+                       FROM locker_compartments c JOIN locker s ON s.id = c.station_id
+                       WHERE c.active AND s.zone <> 'STRESS_TEST' GROUP BY 1, 2"""
                 )
                 for size, state, count in cur.fetchall():
                     compartments.add_metric([size, state], count)
-                cur.execute("SELECT status, count(*) FROM luggage_sessions GROUP BY status")
+                cur.execute(
+                    """SELECT ls.status, count(*) FROM luggage_sessions ls
+                       JOIN locker_compartments c ON c.id = ls.compartment_id
+                       JOIN locker s ON s.id = c.station_id
+                       WHERE s.zone <> 'STRESS_TEST' GROUP BY ls.status"""
+                )
                 for status, count in cur.fetchall():
                     luggage.add_metric([status], count)
             up.add_metric([], 1)

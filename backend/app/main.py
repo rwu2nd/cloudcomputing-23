@@ -46,6 +46,9 @@ from app.luggage import (
     require_admin_user,
     authenticated_user,
     ensure_admin_account,
+    is_stress_user,
+    STRESS_PREFIX,
+    STRESS_ZONE,
 )
 
 logger = logging.getLogger(__name__)
@@ -396,9 +399,10 @@ def list_stations():
                                           AND c.size = 'XL') AS available_xl
                FROM locker AS s
                LEFT JOIN locker_compartments AS c ON c.station_id = s.id
-               WHERE s.active = TRUE
+               WHERE s.active = TRUE AND s.zone <> %s
                GROUP BY s.id
-               ORDER BY s.id"""
+               ORDER BY s.id""",
+            (STRESS_ZONE,),
         )
         rows = cur.fetchall()
     return [
@@ -537,11 +541,14 @@ def create_reservation(
             _acquire_allocation_lock(cur)
 
             cur.execute(
-                "SELECT id FROM locker WHERE id = %s AND active = TRUE",
+                "SELECT id, zone FROM locker WHERE id = %s AND active = TRUE",
                 (payload.station_id,),
             )
+            station = cur.fetchone()
 
-            if cur.fetchone() is None:
+            # The stress-test station is only for stress-test accounts, and
+            # those accounts may not book real lockers.
+            if station is None or (station["zone"] == STRESS_ZONE) != is_stress_user(user):
                 raise HTTPException(
                     status_code=422,
                     detail="Unknown or inactive selected station"
@@ -957,8 +964,9 @@ def admin_locker_snapshot(admin: dict = Depends(require_admin_user)):
                LEFT JOIN luggage_sessions ls
                  ON ls.id = c.reserved_by
                 AND ls.status IN ('STORED','PAYMENT_PENDING','PAID_AWAITING_PICKUP')
-               WHERE s.active = TRUE
-               ORDER BY s.id, c.id"""
+               WHERE s.active = TRUE AND s.zone <> %s
+               ORDER BY s.id, c.id""",
+            (STRESS_ZONE,),
         )
         rows = cur.fetchall()
     stations = {}
@@ -987,8 +995,9 @@ def admin_list_users(admin: dict = Depends(require_admin_user)):
         cur.execute(
             """SELECT id, username
                FROM public."user"
-               WHERE role = 'USER'
-               ORDER BY LOWER(username), id"""
+               WHERE role = 'USER' AND username NOT LIKE %s
+               ORDER BY LOWER(username), id""",
+            (STRESS_PREFIX + "%",),
         )
         return [
             {"id": str(row["id"]), "username": row["username"]}

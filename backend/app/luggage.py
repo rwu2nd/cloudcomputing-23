@@ -43,6 +43,15 @@ AUTH_TTL_HOURS = int(os.getenv("LUGGAGE_AUTH_TTL_HOURS", "12"))
 DEMO_MODE = os.getenv("LUGGAGE_DEMO_MODE", "false").lower() == "true"
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.-]{3,32}$")
 
+# Stress tests (admin dashboard) use their own test lockers in a station with
+# this zone, and their own accounts with this username prefix. See stress.py.
+STRESS_ZONE = "STRESS_TEST"
+STRESS_PREFIX = "stress-"
+
+
+def is_stress_user(user: dict) -> bool:
+    return str(user.get("username", "")).startswith(STRESS_PREFIX)
+
 
 class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=32, pattern=r"^[a-zA-Z0-9_.-]{3,32}$")
@@ -266,6 +275,8 @@ def _session_query() -> str:
 def register_account(payload: RegisterRequest):
     """Create a username/password account and sign the new user in."""
     username = _normalize_username(payload.username)
+    if username.startswith(STRESS_PREFIX):
+        raise HTTPException(status_code=422, detail=f"Usernames starting with '{STRESS_PREFIX}' are reserved for stress tests")
     password_hash = _hash_password(payload.password)
     user_id = uuid4()
     with _db_connection() as conn, conn.cursor() as cur:
@@ -345,7 +356,10 @@ def list_available_luggage_slots(user: dict = Depends(_current_user)):
                JOIN locker s ON s.id = c.station_id
                WHERE c.size = 'XL' AND c.active = TRUE AND s.active = TRUE
                  AND c.reserved_by IS NULL
-               ORDER BY s.id, c.label"""
+                 -- stress-test accounts only see the test lockers, everyone else never does
+                 AND (s.zone = %s) = %s
+               ORDER BY s.id, c.label""",
+            (STRESS_ZONE, is_stress_user(user)),
         )
         return cur.fetchall()
 
@@ -363,8 +377,9 @@ def store_luggage(payload: StoreLuggageRequest, user: dict = Depends(_current_us
                JOIN locker s ON s.id = c.station_id
                WHERE c.id = %s AND c.size = 'XL' AND c.active = TRUE
                  AND s.active = TRUE AND c.reserved_by IS NULL
+                 AND (s.zone = %s) = %s
                FOR UPDATE OF c""",
-            (payload.compartment_id,),
+            (payload.compartment_id, STRESS_ZONE, is_stress_user(user)),
         )
         compartment = cur.fetchone()
         if compartment is None:

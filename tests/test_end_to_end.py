@@ -141,3 +141,15 @@ def test_metrics_endpoint_exposes_app_metrics():
     text = call("GET", "/metrics", expected=200).text
     for name in ("smartlocker_http_requests_total", "smartlocker_reservations", "process_cpu_seconds_total"):
         assert name in text, name
+
+
+def test_stress_test_lockers_are_hidden_from_users(user):
+    # Stress-test accounts can only be created by the stress test itself.
+    reply = call("POST", "/api/luggage/auth/register",
+                 json={"username": "stress-" + uuid.uuid4().hex[:8], "password": "Password123!"})
+    assert reply.status_code == 422, reply.text
+    # The test lockers never appear in the normal station or luggage lists.
+    stations = call("GET", "/api/stations", expected=200).json()
+    assert all(s["zone"] != "STRESS_TEST" for s in stations)
+    slots = call("GET", "/api/luggage/slots", user["token"], expected=200).json()
+    assert all(s["zone"] != "STRESS_TEST" for s in slots)
