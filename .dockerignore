@@ -16,5 +16,8 @@
 # Not needed inside any image
 kubernetes
 database
-README.md
+monitoring
+loadtest
+.github
+*.md
 Makefile

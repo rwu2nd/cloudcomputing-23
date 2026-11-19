@@ -1,0 +1,7 @@
+# Same gRPC/protobuf versions as backend/requirements.txt so the generated
+# stubs match on both sides of the connection.
+grpcio==1.85.1
+grpcio-health-checking==1.85.1
+grpcio-reflection==1.85.1
+protobuf==7.36.2
+prometheus-client==0.26.0

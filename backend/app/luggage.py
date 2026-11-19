@@ -25,6 +25,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from psycopg2.extras import RealDictCursor
 
+from app import locker_controller
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -382,6 +383,19 @@ def store_luggage(payload: StoreLuggageRequest, user: dict = Depends(_current_us
         if cur.rowcount != 1:
             raise HTTPException(status_code=409, detail="That XL locker was just claimed")
 
+    # The compartment is now ours, so open its door over gRPC (outside the
+    # lock). If the controller cannot open it, undo the claim so the locker is
+    # not left reserved for luggage that was never put in: a compensating
+    # step, as in the saga pattern, instead of one distributed transaction.
+    try:
+        door = locker_controller.unlock(
+            "LUGGAGE_STORE", compartment["station_id"], compartment["id"], compartment["label"]
+        )
+    except HTTPException:
+        _undo_luggage_claim(session_id, payload.compartment_id, compartment["station_id"])
+        raise
+
+    with _db_connection() as conn, conn.cursor() as cur:
         unlock_event = _record_virtual_unlock(
             cur, user_id, session_id, payload.compartment_id, "STORE"
         )
@@ -398,8 +412,35 @@ def store_luggage(payload: StoreLuggageRequest, user: dict = Depends(_current_us
             "simulated": True,
             "event_id": str(unlock_event["id"]),
             "message": "Virtual locker unlocked. Place your luggage in the selected slot and close it in the demo.",
+            "door": door,
         },
     }
+
+
+def _undo_luggage_claim(session_id: UUID, compartment_id: int, station_id: int) -> None:
+    """Release a compartment claimed by store_luggage whose door never opened."""
+    try:
+        with _db_connection() as conn, conn.cursor() as cur:
+            _acquire_locker_lock(cur)
+            cur.execute(
+                """UPDATE locker_compartments SET reserved_by = NULL
+                   WHERE id = %s AND reserved_by = %s""",
+                (compartment_id, str(session_id)),
+            )
+            cur.execute(
+                """UPDATE luggage_sessions SET status = 'CANCELLED', updated_at = NOW()
+                   WHERE id = %s AND status = 'STORED'""",
+                (str(session_id),),
+            )
+            cur.execute(
+                """UPDATE locker_reservations
+                   SET last_attempt_at = NULL, queue_updated_at = clock_timestamp()
+                   WHERE status = 'CONDITIONAL' AND station_id = %s""",
+                (station_id,),
+            )
+        logger.info("Released compartment %s after the door failed to open", compartment_id)
+    except psycopg2.Error:
+        logger.exception("Could not release compartment %s after a failed unlock", compartment_id)
 
 
 @router.get("/sessions", tags=["luggage"])
@@ -541,7 +582,31 @@ def demo_confirm_payment(payment_reference: UUID, user: dict = Depends(_current_
 
 @router.post("/sessions/{session_id}/unlock", tags=["luggage"])
 def unlock_my_luggage(session_id: UUID, user: dict = Depends(_current_user)):
-    """Record a virtual unlock only for this user's paid luggage compartment."""
+    """Open this user's paid luggage compartment through the locker-controller."""
+    # 1. Check the request without taking the shared lock.
+    with _db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT ls.status, ls.compartment_id, c.reserved_by, c.station_id, c.label
+               FROM luggage_sessions ls
+               JOIN locker_compartments c ON c.id = ls.compartment_id
+               WHERE ls.id = %s AND ls.user_id = %s""",
+            (str(session_id), str(user["id"])),
+        )
+        current = cur.fetchone()
+    if current is None:
+        raise HTTPException(status_code=404, detail="Luggage session not found")
+    if current["status"] != "PAID_AWAITING_PICKUP":
+        raise HTTPException(status_code=409, detail="Complete demo payment before unlocking")
+    if str(current["reserved_by"]) != str(session_id):
+        raise HTTPException(status_code=409, detail="This locker is no longer assigned to your luggage session")
+
+    # 2. Open the door over gRPC, outside the lock. On failure nothing has
+    #    been recorded, so "Use the app unlock action" still applies.
+    door = locker_controller.unlock(
+        "LUGGAGE_RETRIEVE", current["station_id"], current["compartment_id"], current["label"]
+    )
+
+    # 3. Record the unlock, re-checking under the lock.
     with _db_connection() as conn, conn.cursor() as cur:
         _acquire_locker_lock(cur)
         cur.execute(
@@ -568,6 +633,7 @@ def unlock_my_luggage(session_id: UUID, user: dict = Depends(_current_user)):
         "event_id": str(event["id"]),
         "session_id": str(session_id),
         "message": "Virtual locker unlocked. Collect your luggage, then confirm collection in the app.",
+        "door": door,
     }
 
 

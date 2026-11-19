@@ -1,0 +1,63 @@
+// Contract between the backend (REST API) and the locker-controller service.
+//
+// The browser only ever talks REST/JSON to the backend. Whenever a compartment
+// door has to open (parcel collection, luggage drop-off, luggage pick-up), the
+// backend calls the locker-controller over gRPC. The controller stands in for
+// the door hardware at each station, so it is a separate service that can be
+// scaled, restarted or fail on its own without taking the API down.
+//
+// Python stubs are generated from this file at image build time (see
+// docker/*.Dockerfile). To generate them locally run `make proto`.
+
+syntax = "proto3";
+
+package smartlocker.v1;
+
+service LockerController {
+  // Open one compartment door.
+  //
+  // request_id is an idempotency key: the backend creates one per user action
+  // and reuses it when gRPC retries the call, so a retried request does not
+  // count as a second door opening.
+  rpc UnlockCompartment(UnlockRequest) returns (UnlockReply);
+
+  // Identify the replica that answered. Calling this repeatedly shows the
+  // client-side round-robin load balancing across controller pods.
+  rpc GetControllerInfo(ControllerInfoRequest) returns (ControllerInfo);
+}
+
+enum UnlockReason {
+  UNLOCK_REASON_UNSPECIFIED = 0;
+  UNLOCK_REASON_PARCEL_COLLECT = 1;
+  UNLOCK_REASON_LUGGAGE_STORE = 2;
+  UNLOCK_REASON_LUGGAGE_RETRIEVE = 3;
+}
+
+message UnlockRequest {
+  string request_id = 1;
+  int64 station_id = 2;
+  int64 compartment_id = 3;
+  string compartment_label = 4;
+  UnlockReason reason = 5;
+}
+
+message UnlockReply {
+  bool opened = 1;
+  // Pod (or container) name of the controller replica that handled the call.
+  string controller_id = 2;
+  int64 opened_at_unix_ms = 3;
+  // True when this replica had already handled the same request_id.
+  bool duplicate = 4;
+  // Simulated time the door mechanism took to open.
+  uint32 actuation_ms = 5;
+}
+
+message ControllerInfoRequest {}
+
+message ControllerInfo {
+  string controller_id = 1;
+  int64 started_at_unix_ms = 2;
+  uint64 unlocks_handled = 3;
+  double failure_rate = 4;
+  uint32 actuation_ms = 5;
+}

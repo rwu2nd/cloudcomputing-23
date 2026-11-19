@@ -34,6 +34,7 @@ from fastapi import Depends, FastAPI, HTTPException, Path, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ConfigDict
 
+from app import locker_controller
 from app.config import get_settings
 from app.health import router as health_router
 from app.luggage import (
@@ -773,8 +774,32 @@ def unlock_locker(
     reservation_id: UUID,
     user: dict = Depends(authenticated_user),
 ):
-    """Simulate unlocking the locker booked by the signed-in user."""
+    """Open the user's locker through the locker-controller, then release it."""
 
+    # 1. Check the request without taking the allocation lock.
+    with db_connection() as conn, conn.cursor() as cur:
+        reservation = _get_reservation(cur, reservation_id)
+        if reservation["customer_id"] != str(user["id"]):
+            raise HTTPException(status_code=403, detail="This parcel belongs to another account")
+        if reservation["status"] != "ARRIVED":
+            raise HTTPException(status_code=409, detail="Parcel is not available for collection")
+        if reservation["compartment_id"] is None:
+            raise HTTPException(status_code=409, detail="No compartment is allocated")
+        cur.execute("SELECT label FROM locker_compartments WHERE id = %s", (reservation["compartment_id"],))
+        compartment = cur.fetchone()
+
+    # 2. Open the door over gRPC. This happens outside the lock so a slow or
+    #    unavailable controller cannot hold up allocations at other lockers.
+    #    If it fails, nothing has changed yet and the user can simply retry.
+    door = locker_controller.unlock(
+        "PARCEL_COLLECT",
+        reservation["station_id"],
+        reservation["compartment_id"],
+        compartment["label"] if compartment else "",
+    )
+
+    # 3. Record the collection. The checks run again under the lock in case
+    #    the reservation changed while the door was opening.
     with db_connection() as conn, conn.cursor() as cur:
         _acquire_allocation_lock(cur)
         reservation = _get_reservation(cur, reservation_id, lock=True)
@@ -827,6 +852,7 @@ def unlock_locker(
             "message": "Locker unlocked",
             "reservation_id": str(reservation_id),
             "status": "FULFILLED",
+            "door": door,
         }
 
 @app.post("/api/reservations/{reservation_id}/fulfill", response_model=ReservationOut, tags=["reservations"])
@@ -1050,6 +1076,21 @@ def admin_release_allocation(compartment_id: int, admin: dict = Depends(require_
             (compartment["station_id"],),
         )
     return {"compartment_id": compartment_id, "released": released_type}
+
+
+@app.get("/api/admin/controller", tags=["admin"])
+def admin_controller_info(admin: dict = Depends(require_admin_user)):
+    """Ask the locker-controller who it is a few times over gRPC.
+
+    With two or more controller pods the answers come from different replicas,
+    which shows the client-side round-robin load balancing at work.
+    """
+    replies = locker_controller.controller_info()
+    return {
+        "address": locker_controller.ADDRESS or None,
+        "replicas_seen": sorted({r["controller"] for r in replies if "controller" in r}),
+        "replies": replies,
+    }
 
 
 @app.post("/api/admin/tests/concurrency", tags=["admin"])
