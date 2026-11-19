@@ -315,6 +315,168 @@ function Fault({ request, status }) {
 }
 
 
+
+// ------------------------------------------------------------ run report
+
+const fmtVal = (v, unit) => (v === null || v === undefined ? "–" : `${v}${unit === "%" ? "%" : unit ? ` ${unit}` : ""}`);
+
+function reportMarkdown(r) {
+  const c = r.config || {}, k = r.client || {}, sc = r.scaling || {}, j = r.journeys || {};
+  const lines = [
+    `# Stress test report: ${r.run}`, "",
+    `- Started: ${r.started}  `, `- Duration: ${r.duration_seconds} s  `,
+    `- Load: ${(c.scenarios || []).join(", ") || "browse"} (${c.intensity || "custom"})  `,
+    `- Chaos: ${(c.chaos || []).join(", ") || "none"}`, "",
+    `## SLO scorecard (${r.summary.slo_passed}/${r.summary.slo_total} passed)`, "",
+    "| Objective | Target | Measured | Result |", "|---|---|---|---|",
+    ...r.slo.map((x) => `| ${x.name} | ${x.target} | ${fmtVal(x.measured, x.unit)} | ${x.pass === null ? "n/a" : x.pass ? "PASS" : "FAIL"} |`),
+    "", "## Client view (k6)", "",
+    `- Requests: ${k.requests} (${k.requests_per_second}/s), failed ${k.failed} (${k.failed_percent}%)`,
+    `- Availability: ${k.availability_percent}%`,
+    `- Latency: p50 ${k.p50_ms} ms, p95 ${k.p95_ms} ms, p99 ${k.p99_ms} ms, max ${k.max_ms} ms`,
+    `- Peak server throughput: ${r.peak_requests_per_second} requests/s`, "",
+    "## Phases (server view, Prometheus)", "",
+    "| Phase | Window | Requests | 5xx | Availability | p95 |", "|---|---|---|---|---|---|",
+    ...r.phases.map((p) => `| ${p.name} | ${p.from_seconds}-${p.to_seconds} s | ${p.requests ?? "–"} | ${p.errors_5xx} | ${fmtVal(p.availability_percent, "%")} | ${fmtVal(p.p95_ms, "ms")} |`),
+    "", "## Incidents", "",
+    ...(r.incidents.length ? r.incidents.map((i) =>
+      `- **${i.label}** at +${i.at_seconds} s: ${i.failures ?? 0} failed operations` +
+      (i.outage_seconds !== undefined ? `, user-visible outage ${i.outage_seconds} s` : "") +
+      (i.recovered_after_restore_seconds != null ? `, working again ${i.recovered_after_restore_seconds} s after the controller came back` : "") +
+      (i.kind === "failover" && i.recovered_after_seconds != null ? `, recovered ${i.recovered_after_seconds} s after the kill` : "") +
+      (i.injected_faults != null ? `, ${i.injected_faults} faults injected, ${i.unlocks_failed_for_users} unlock failures seen by users` : "") +
+      (i.errors_by_route && Object.keys(i.errors_by_route).length ? `; 5xx by route: ${Object.entries(i.errors_by_route).map(([a, b]) => `${a} ${b}`).join(", ")}` : "")) : ["- none"]),
+    "", "## Elasticity", "",
+    sc.initial_pods != null ? `- Backend pods ${sc.initial_pods} -> ${sc.peak_pods}; first scale-out at +${sc.first_scale_out_seconds ?? "–"} s, peak at +${sc.peak_reached_seconds ?? "–"} s` : "- no data",
+    "", "## Correctness and durability", "",
+    `- Compartment holds checked: ${r.correctness.holds_checked}, held by two bookings at once: ${r.correctness.double_allocations}`,
+    `- Parcels collected: ${j.parcels_collected_seen_by_clients} seen by clients, ${j.parcels_collected_in_database} in the database`,
+    `- Luggage collected: ${j.luggage_collected_seen_by_clients} seen by clients, ${j.luggage_collected_in_database} in the database`,
+    `- Unlocks retried: ${j.unlock_retries}, recovered by retrying: ${j.unlocks_recovered_by_retry}, given up: ${j.unlocks_given_up}`,
+    `- Real-station bookings during the run: ${r.correctness.real_bookings} (${r.correctness.real_bookings_ok} allocated or completed)`,
+    "",
+  ];
+  return lines.join("\n");
+}
+
+function reportCsv(r) {
+  const rows = [["section", "metric", "value"]];
+  const add = (sec, obj) => Object.entries(obj || {}).forEach(([k, v]) => typeof v !== "object" && rows.push([sec, k, v]));
+  add("run", { run: r.run, started: r.started, duration_seconds: r.duration_seconds,
+    scenarios: (r.config?.scenarios || []).join(" "), chaos: (r.config?.chaos || []).join(" "), intensity: r.config?.intensity });
+  add("client", r.client); add("scaling", r.scaling); add("journeys", r.journeys); add("correctness", r.correctness);
+  r.phases.forEach((p) => add(`phase:${p.name}`, p));
+  r.incidents.forEach((i) => add(`incident:${i.kind}`, i));
+  r.slo.forEach((x) => rows.push(["slo", x.name, `${x.measured ?? ""} (target ${x.target}) ${x.pass === null ? "n/a" : x.pass ? "PASS" : "FAIL"}`]));
+  return rows.map((row) => row.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+}
+
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url; a.download = name; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function RunReport({ request, runName, finished }) {
+  const [report, setReport] = useState(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [selected, setSelected] = useState(null);
+
+  const load = useCallback(async (name, refresh = false) => {
+    setBusy(true); setError("");
+    try {
+      setReport(await request(`/demo/stress/report?${new URLSearchParams({ ...(name ? { run: name } : {}), ...(refresh ? { refresh: "true" } : {}) })}`));
+      setHistory(await request("/demo/stress/reports"));
+    } catch (e) { setError(e.message); } finally { setBusy(false); }
+  }, [request]);
+
+  useEffect(() => { if (finished && runName) { setSelected(runName); load(runName); } }, [finished, runName, load]);
+  useEffect(() => { request("/demo/stress/reports").then(setHistory).catch(() => {}); }, [request]);
+
+  const cell = { padding: "4px 8px", borderBottom: "1px solid #edf1f7", fontSize: 12.5, textAlign: "left" };
+  const r = report;
+  return (
+    <div style={{ marginTop: 14, borderTop: "1px solid #e1e7f0", paddingTop: 12 }}>
+      <div className="admin-row">
+        <small style={{ fontWeight: 800, color: "#475d77" }}>RUN REPORT{r ? ` · ${r.run}` : ""}</small>
+        {r && (
+          <div style={{ display: "flex", gap: 6 }}>
+            <button onClick={() => download(`${r.run}.md`, reportMarkdown(r), "text/markdown")}>Markdown</button>
+            <button onClick={() => download(`${r.run}.csv`, reportCsv(r), "text/csv")}>CSV</button>
+            <button disabled={busy} onClick={() => load(r.run, true)} title="Recalculate from the logs and metrics">Rebuild</button>
+          </div>
+        )}
+      </div>
+      {busy && <p className="muted">Building the report from k6, Prometheus and the database…</p>}
+      {error && <div className="error">{error}</div>}
+      {!r && !busy && !error && <p className="muted">A report appears here when a run finishes.</p>}
+      {r && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 6, marginTop: 8 }}>
+            {[
+              ["SLOs passed", `${r.summary.slo_passed} / ${r.summary.slo_total}`],
+              ["Availability", fmtVal(r.client.availability_percent, "%")],
+              ["Requests", r.client.requests],
+              ["p95 / p99", r.client.p95_ms != null ? `${Math.round(r.client.p95_ms)} / ${Math.round(r.client.p99_ms)} ms` : "–"],
+              ["Peak req/s", r.peak_requests_per_second],
+              ["Pods", r.scaling ? `${r.scaling.initial_pods} → ${r.scaling.peak_pods}` : "–"],
+            ].map(([k, v]) => (
+              <div key={k} style={{ background: "#edf3fa", borderRadius: 9, padding: "7px 10px" }}>
+                <small style={{ color: "#66788d", fontSize: 11 }}>{k}</small>
+                <div style={{ fontSize: 16, fontWeight: 800 }}>{v ?? "–"}</div>
+              </div>
+            ))}
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 10 }}>
+            <thead><tr>{["Objective", "Target", "Measured", ""].map((h) => <th key={h} style={{ ...cell, color: "#66788d" }}>{h}</th>)}</tr></thead>
+            <tbody>
+              {r.slo.map((x) => (
+                <tr key={x.name}>
+                  <td style={cell}>{x.name}</td><td style={cell}>{x.target}</td><td style={cell}>{fmtVal(x.measured, x.unit)}</td>
+                  <td style={cell}>{x.pass === null ? <span className="pill">n/a</span> : <span className={`pill ${x.pass ? "good" : "bad"}`}>{x.pass ? "PASS" : "FAIL"}</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <details style={{ marginTop: 8 }}>
+            <summary style={{ cursor: "pointer", fontWeight: 700, color: "#2254ab", fontSize: 13 }}>Incidents, phases and correctness</summary>
+            <pre style={{ whiteSpace: "pre-wrap", fontSize: 12, background: "#f6f8fc", padding: 10, borderRadius: 8 }}>
+              {reportMarkdown(r).split("## Incidents")[1]?.replace(/\*\*/g, "")}
+            </pre>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>{["Phase", "Window", "Requests", "5xx", "Availability", "p95"].map((h) => <th key={h} style={{ ...cell, color: "#66788d" }}>{h}</th>)}</tr></thead>
+              <tbody>{r.phases.map((p) => (
+                <tr key={p.name}><td style={cell}>{p.name}</td><td style={cell}>{p.from_seconds}–{p.to_seconds} s</td><td style={cell}>{p.requests ?? "–"}</td>
+                  <td style={cell}>{p.errors_5xx}</td><td style={cell}>{fmtVal(p.availability_percent, "%")}</td><td style={cell}>{fmtVal(p.p95_ms, "ms")}</td></tr>
+              ))}</tbody>
+            </table>
+          </details>
+        </>
+      )}
+      {history.length > 0 && (
+        <details style={{ marginTop: 8 }}>
+          <summary style={{ cursor: "pointer", fontWeight: 700, color: "#2254ab", fontSize: 13 }}>Past runs ({history.length})</summary>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <tbody>{history.map((h) => (
+              <tr key={h.run_name} onClick={() => { setSelected(h.run_name); load(h.run_name); }}
+                style={{ cursor: "pointer", background: selected === h.run_name ? "#eaf3ff" : undefined }}>
+                <td style={cell}><code>{h.run_name}</code></td>
+                <td style={cell}>{new Date(h.started_at).toLocaleString()}</td>
+                <td style={cell}>{(h.config?.scenarios || []).join(", ")}{h.config?.chaos?.length ? ` + ${h.config.chaos.join(", ")}` : ""}</td>
+                <td style={cell}>{fmtVal(h.summary?.availability_percent, "%")}</td>
+                <td style={cell}>{h.summary ? `${h.summary.slo_passed}/${h.summary.slo_total} SLOs` : ""}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </details>
+      )}
+    </div>
+  );
+}
+
 // ------------------------------------------------------------ stress test
 
 const LOAD_OPTIONS = [
@@ -513,8 +675,14 @@ function Stress({ request, status }) {
         </div>
       </div>
 
+      {status?.kubernetes && (
+        <RunReport request={request} runName={runInfo?.name}
+          finished={Boolean(runInfo && ["succeeded", "failed"].includes(runInfo.state))} />
+      )}
+
       <details style={{ marginTop: 12 }}>
         <summary style={{ cursor: "pointer", fontWeight: 700, color: "#2254ab" }}>Graphs</summary>
+        <GrafanaPanel id={24} title="Availability" available={status?.prometheus} />
         <GrafanaPanel id={9} title="Requests / s per backend pod" available={status?.prometheus} />
         <GrafanaPanel id={14} title="Unlock calls by result" available={status?.prometheus} />
         <GrafanaPanel id={20} title="PostgreSQL instances" available={status?.prometheus} />
