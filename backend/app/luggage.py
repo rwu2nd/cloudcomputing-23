@@ -106,6 +106,45 @@ def _verify_password(password: str, encoded_hash: str) -> bool:
         return False
 
 
+def ensure_admin_account() -> None:
+    """Create the administrator named by ADMIN_USERNAME if it does not exist yet.
+
+    02-seed.sql already creates admin / Admin@12345, so with the default values
+    this does nothing. Setting a different ADMIN_USERNAME (and
+    ADMIN_INITIAL_PASSWORD) creates that admin on startup. An existing account
+    is never modified: the password is only the *initial* one, so changing it
+    in .env later does not reset anyone's password.
+    """
+    username = os.getenv("ADMIN_USERNAME", "").strip()
+    password = os.getenv("ADMIN_INITIAL_PASSWORD", "")
+    if not username or not password:
+        return
+    try:
+        username = _normalize_username(username)
+    except HTTPException:
+        logger.warning("ADMIN_USERNAME %r is not a valid username; no admin account created", username)
+        return
+    try:
+        conn = _db_connection()
+        try:
+            with conn, conn.cursor() as cur:
+                # ON CONFLICT covers both the username and lower(username) unique
+                # indexes, and makes this safe when several replicas start at once.
+                cur.execute(
+                    """INSERT INTO public."user"(id, username, password_hash, role)
+                       VALUES (%s, %s, %s, 'ADMIN')
+                       ON CONFLICT DO NOTHING""",
+                    (str(uuid4()), username, _hash_password(password)),
+                )
+                if cur.rowcount:
+                    logger.info("Created administrator account %r from ADMIN_USERNAME", username)
+        finally:
+            conn.close()
+    except psycopg2.Error as exc:
+        # The database may still be starting; the seeded admin still works.
+        logger.warning("Could not ensure admin account %r: %s", username, exc)
+
+
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 

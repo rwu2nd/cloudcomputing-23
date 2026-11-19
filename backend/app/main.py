@@ -30,7 +30,8 @@ from uuid import UUID, uuid4
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from fastapi import Depends, FastAPI, HTTPException, Path, status
+from fastapi import Depends, FastAPI, HTTPException, Path, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ConfigDict
 
 from app.config import get_settings
@@ -41,6 +42,7 @@ from app.luggage import (
     StoreLuggageRequest,
     require_admin_user,
     authenticated_user,
+    ensure_admin_account,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,21 @@ app = FastAPI(
 )
 app.include_router(health_router)
 app.include_router(luggage_router)
+
+
+# Connection problems (database down, restarting, unreachable) used to surface
+# as a bare 500. Report them as 503 so clients and the frontend can tell
+# "try again shortly" apart from a real bug. Covers main.py and luggage.py.
+@app.exception_handler(psycopg2.OperationalError)
+@app.exception_handler(psycopg2.InterfaceError)
+async def database_unavailable_handler(request: Request, exc: Exception):
+    logger.warning("Database unavailable for %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": "Database is temporarily unavailable, please try again shortly"},
+    )
+
+
 # All allocation-affecting API operations and worker runs use the same
 # transaction-scoped lock. PostgreSQL coordinates this across API replicas.
 ALLOCATION_LOCK_KEY = 731_904_221
@@ -336,6 +353,9 @@ async def _allocation_worker() -> None:
 @app.on_event("startup")
 async def startup():
     global _worker_task
+
+    # Runs in a thread because it does blocking database work.
+    await asyncio.to_thread(ensure_admin_account)
 
     if _worker_task is None or _worker_task.done():
         _worker_task = asyncio.create_task(_allocation_worker())
@@ -1056,12 +1076,11 @@ def admin_concurrency_test(payload: AdminConcurrencyRequest, admin: dict = Depen
             if group.station_id not in active_stations:
                 errors.append({"kind": group.kind, "detail": f"Station {group.station_id} is inactive or missing"})
 
-        luggage_groups = [
-            group for group in payload.groups
-            if group.kind == "LUGGAGE" and group.station_id in active_stations
-        ]
+        # One synthetic account per run owns every test parcel and luggage
+        # session, so the normal ownership checks in the booking, arrive and
+        # luggage endpoints apply to the demo exactly as they do to real users.
         test_user = None
-        if luggage_groups:
+        if any(group.station_id in active_stations for group in payload.groups):
             test_user_id = uuid4()
             test_username = f"admin-test-{run_id.hex[:12]}"
             test_salt = secrets.token_bytes(16)
@@ -1102,16 +1121,22 @@ def admin_concurrency_test(payload: AdminConcurrencyRequest, admin: dict = Depen
                 if len(candidates) < group.count:
                     errors.append({"kind": group.kind, "detail": "Not enough free XL compartments for every luggage test request"})
             else:
+                # Bookings need an assigned parcel, so give the test user one
+                # parcel per request. They commit with this transaction, before
+                # the concurrent bookings below start.
                 for index in range(group.count):
-                    customer_id = f"ADMIN-TEST-{run_id.hex[:8]}-{len(tasks)}"
+                    parcel_id = uuid4()
+                    cur.execute(
+                        """INSERT INTO parcels (id, user_id, size, description, assigned_by)
+                           VALUES (%s, %s, %s, %s, %s)""",
+                        (str(parcel_id), str(test_user["id"]), group.size.value,
+                         f"Concurrency test {run_id.hex[:8]} ({group.kind})", str(admin["id"])),
+                    )
                     tasks.append((
                         group.kind, group.size.value,
-                        lambda group=group, customer_id=customer_id: create_reservation(
-                            ReservationCreate(
-                                customer_id=customer_id,
-                                station_id=group.station_id,
-                                required_size=group.size,
-                            )
+                        lambda group=group, parcel_id=parcel_id: create_reservation(
+                            ReservationCreate(station_id=group.station_id, parcel_id=parcel_id),
+                            test_user,
                         ),
                     ))
 
@@ -1163,7 +1188,7 @@ def admin_concurrency_test(payload: AdminConcurrencyRequest, admin: dict = Depen
             item["compartment_id"] = current["compartment_id"]
 
     def arrive(reservation_id):
-        return mark_reservation_arrived(UUID(reservation_id))
+        return mark_reservation_arrived(UUID(reservation_id), test_user)
 
     if allocated_ids:
         with ThreadPoolExecutor(max_workers=min(32, len(allocated_ids))) as pool:
