@@ -48,7 +48,7 @@ handy for development. Kubernetes adds the replication, autoscaling and self-hea
 | Zero-downtime deployments | Rolling updates with `maxUnavailable: 0`, readiness gates, `preStop` delays, and a gRPC server that reports NOT_SERVING and drains before exiting | deployments, `server.py` |
 | Disruption budgets, spreading | PodDisruptionBudgets keep at least one pod of each service during node drains; topology spread puts replicas on different nodes | `kubernetes/*/pdb.yaml` |
 | Observability | Every pod exposes Prometheus metrics; Prometheus discovers pods through the Kubernetes API (so autoscaled pods appear automatically); Grafana shows traffic, latency, pods, gRPC calls, lockers and database roles | `backend/app/metrics.py`, `monitoring/`, `kubernetes/monitoring/` |
-| Load testing | A k6 job runs **inside** the cluster, so its traffic is spread over all backend pods | `kubernetes/loadtest/` |
+| Load and stress testing | A k6 job runs **inside** the cluster, so its traffic is spread over all backend pods. The admin dashboard's Stress Test combines browsing, real parcel and luggage journeys and booking churn with chaos events (controller faults, controller outage, database failover), on 14 dedicated test lockers that users never see | `kubernetes/loadtest/smart-locker.js`, `backend/app/stress.py` |
 | Demo controls, least privilege | The admin dashboard's System tests read cluster state with a read-only Role; the buttons that change the cluster need a second Role that is only applied for a demo (`make k8s-demo-on`). The backend checks its own permissions with a SelfSubjectAccessReview | `backend/app/demo.py`, `kubernetes/backend/rbac.yaml`, `kubernetes/demo-controls/` |
 | CI/CD | GitHub Actions builds and tests with Compose, deploys to a throwaway 3-node kind cluster, tests again after killing the database primary, and publishes images to GitHub Container Registry from `main` | `.github/workflows/ci.yml` |
 
@@ -101,24 +101,33 @@ make k8s-app         # http://localhost:8080, sign in as admin / Admin@12345
 Each test page shows live numbers, the pods involved, and the matching Grafana graphs (Grafana is
 served by the app itself at `/grafana/`, so no extra window is needed).
 
-1. **Concurrency Test.** Send more bookings than there are free lockers at once: every compartment is
+1. **Stress Test.** Tick the load to run at the same time (browse & sign in, parcel journeys, luggage
+   sessions, book & cancel churn) and any chaos events (40% controller faults, controller outage, kill the
+   DB primary), pick an intensity and length, and press *Start*. It all runs on the 14 lockers of
+   **Stress Test Bay**, which users never see, so real lockers stay free. Watch:
+   - the test-locker grid filling and emptying as parcels and luggage come and go,
+   - the console: every finished journey, chaos event, failed unlock and retry, as it happens,
+   - the tiles: backend pods scaling out, requests/s, 5xx errors, p95 latency, doors opened.
+   While it runs, sign in as a normal user in another window and book and collect a parcel at a real
+   station: it still works. When the run ends the test lockers are freed automatically.
+2. **Concurrency Test.** Send more bookings than there are free lockers at once: every compartment is
    given out exactly once, the rest wait as `CONDITIONAL`.
-2. **Load Balancing.** *Send 30 HTTP requests*: the replies come from both backend pods (Kubernetes
+3. **Load Balancing.** *Send 30 HTTP requests*: the replies come from both backend pods (Kubernetes
    Service). *Send 30 gRPC calls*: the backend spreads them over both locker-controller pods itself
    (round robin over a headless Service).
-3. **Scalability.** *Start load test* (40 users, 2 minutes at peak). Watch "CPU vs target" pass 60% and
+4. **Scalability.** *Start load test* (40 users, 2 minutes at peak). Watch "CPU vs target" pass 60% and
    "Backend pods" go from 2 up to 6, with the per-pod graphs spreading out. It takes a minute or two to
    react because metrics-server samples once a minute. After the test the pods scale back down.
-4. **Fault Tolerance.**
+5. **Fault Tolerance.**
    - *Inject 40% faults*, then collect a parcel or store luggage in a user window: it still works,
      because gRPC retries the failed calls. *Clear faults* afterwards.
    - *Stop controller*: browsing and booking still work, unlocking fails after 3 s with "The locker
      controller is not responding". *Start controller* and it works again.
    - *Kill database primary*: the roles in "Database instances" change within seconds, a replica is
      now primary, and the old primary comes back as a replica. About 2 s of requests fail.
-5. **Zero-downtime deploy.** `kubectl -n smart-locker rollout restart deployment/backend` while using
+6. **Zero-downtime deploy.** `kubectl -n smart-locker rollout restart deployment/backend` while using
    the app: pods are replaced one at a time and nothing fails.
-6. **CI/CD.** Open the repository's **Actions** tab: every pull request builds the images, runs the tests
+7. **CI/CD.** Open the repository's **Actions** tab: every pull request builds the images, runs the tests
    on Compose and on a 3-node Kubernetes cluster, and kills the database primary to prove failover.
 
 Run `make k8s-demo-off` afterwards to take the extra permissions away again. On Docker Compose the
@@ -140,6 +149,7 @@ Measured on 2026-11-19 on a laptop (minikube 1.39, Kubernetes 1.37, single node,
 | Autoscaler during that test | CPU reached 285% of the request; backend pods 2 → 4 → 6 within 30 s, then back down one pod every 30 s after the test |
 | Database primary deleted under steady read + write traffic | about **2 s** of failed requests, then a replica was primary and all tests passed |
 | locker-controller rolling restart under continuous gRPC calls | **0 of 756** calls failed |
+| Stress test, medium intensity, 2 min, all four load types plus all three chaos events, with a normal user booking and collecting a parcel at a real station mid-run | 155 parcels collected, 82 luggage sessions, 268 cancellations; backend scaled 2 → 6 pods; unlocks failed during the controller outage and succeeded on retry ~9 s after it came back; the real user's journey took 2.3 s; real lockers unchanged; all 14 test lockers freed at the end |
 | locker-controller stopped (Compose) | unlocks fail with 503 after 3 s, booking and browsing unaffected, a luggage claim whose door did not open is released again |
 | 40% injected controller faults | every unlock still succeeded through gRPC retries |
 | 2 controller replicas | calls alternate between them |

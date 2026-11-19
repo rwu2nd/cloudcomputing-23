@@ -288,10 +288,10 @@ kubectl -n smart-locker port-forward svc/prometheus 9090:9090  # Prometheus (opt
 kubectl -n smart-locker port-forward svc/backend 8000:8000     # API docs: http://localhost:8000/docs
 ```
 
-**7. Optional: let the admin dashboard run the demos.** The Testing System pages (Load Balancing,
-Scalability, Fault Tolerance) always show live state. Their buttons (start a load test, kill the
-database primary, stop the controller, inject faults) need extra permissions for the backend, which
-are only granted while you demo:
+**7. Optional: let the admin dashboard run the demos.** The Testing System pages (Stress Test, Load
+Balancing, Scalability, Fault Tolerance) always show live state. Their buttons (start a stress test,
+kill the database primary, stop the controller, inject faults) need extra permissions for the backend,
+which are only granted while you demo:
 
 ```bash
 make k8s-demo-on      # kubectl apply -k kubernetes/demo-controls
