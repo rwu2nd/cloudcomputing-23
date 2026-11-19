@@ -330,6 +330,11 @@ function reportMarkdown(r) {
     `## SLO scorecard (${r.summary.slo_passed}/${r.summary.slo_total} passed)`, "",
     "| Objective | Target | Measured | Result |", "|---|---|---|---|",
     ...r.slo.map((x) => `| ${x.name} | ${x.target} | ${fmtVal(x.measured, x.unit)} | ${x.pass === null ? "n/a" : x.pass ? "PASS" : "FAIL"} |`),
+    "", "## User journeys (did they complete in the end?)", "",
+    "| Journey | Completed | Failed | No free locker (contention) | Success |", "|---|---|---|---|---|",
+    ...Object.entries(r.journey_success?.by_scenario || {}).map(([name, v]) =>
+      `| ${name} | ${v.completed ?? "all"} | ${v.failed} | ${v.no_free_locker ?? "–"} | ${fmtVal(v.success_percent, "%")} |`),
+    `| **parcel + luggage + churn** | ${r.journey_success?.completed ?? "–"} | ${r.journey_success?.failed ?? "–"} | | **${fmtVal(r.journey_success?.success_percent, "%")}** |`,
     "", "## Client view (k6)", "",
     `- Requests: ${k.requests} (${k.requests_per_second}/s), failed ${k.failed} (${k.failed_percent}%)`,
     `- Availability: ${k.availability_percent}%`,
@@ -364,7 +369,9 @@ function reportCsv(r) {
   const add = (sec, obj) => Object.entries(obj || {}).forEach(([k, v]) => typeof v !== "object" && rows.push([sec, k, v]));
   add("run", { run: r.run, started: r.started, duration_seconds: r.duration_seconds,
     scenarios: (r.config?.scenarios || []).join(" "), chaos: (r.config?.chaos || []).join(" "), intensity: r.config?.intensity });
-  add("client", r.client); add("scaling", r.scaling); add("journeys", r.journeys); add("correctness", r.correctness);
+  add("client", r.client); add("scaling", r.scaling);
+  Object.entries(r.journey_success?.by_scenario || {}).forEach(([name, v]) => add(`journeys:${name}`, v));
+  add("journeys:total", { completed: r.journey_success?.completed, failed: r.journey_success?.failed, success_percent: r.journey_success?.success_percent }); add("journeys", r.journeys); add("correctness", r.correctness);
   r.phases.forEach((p) => add(`phase:${p.name}`, p));
   r.incidents.forEach((i) => add(`incident:${i.kind}`, i));
   r.slo.forEach((x) => rows.push(["slo", x.name, `${x.measured ?? ""} (target ${x.target}) ${x.pass === null ? "n/a" : x.pass ? "PASS" : "FAIL"}`]));
@@ -418,7 +425,8 @@ function RunReport({ request, runName, finished }) {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 6, marginTop: 8 }}>
             {[
               ["SLOs passed", `${r.summary.slo_passed} / ${r.summary.slo_total}`],
-              ["Availability", fmtVal(r.client.availability_percent, "%")],
+              ["Journeys OK", fmtVal(r.journey_success?.success_percent, "%")],
+              ["Requests OK", fmtVal(r.client.availability_percent, "%")],
               ["Requests", r.client.requests],
               ["p95 / p99", r.client.p95_ms != null ? `${Math.round(r.client.p95_ms)} / ${Math.round(r.client.p99_ms)} ms` : "–"],
               ["Peak req/s", r.peak_requests_per_second],
@@ -466,7 +474,8 @@ function RunReport({ request, runName, finished }) {
                 <td style={cell}><code>{h.run_name}</code></td>
                 <td style={cell}>{new Date(h.started_at).toLocaleString()}</td>
                 <td style={cell}>{(h.config?.scenarios || []).join(", ")}{h.config?.chaos?.length ? ` + ${h.config.chaos.join(", ")}` : ""}</td>
-                <td style={cell}>{fmtVal(h.summary?.availability_percent, "%")}</td>
+                <td style={cell} title="journeys completed / requests OK">
+                  {fmtVal(h.summary?.journey_success_percent, "%")} / {fmtVal(h.summary?.availability_percent, "%")}</td>
                 <td style={cell}>{h.summary ? `${h.summary.slo_passed}/${h.summary.slo_total} SLOs` : ""}</td>
               </tr>
             ))}</tbody>
