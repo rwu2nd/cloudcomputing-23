@@ -135,4 +135,5 @@ database data) or `make k8s-down`.
 - **Database down:** API calls return 503 with "Database is temporarily unavailable" and work again within a couple of seconds of the database coming back. `/health/live` keeps returning 200.
 - **Admin account:** `02-seed.sql` always creates `admin` / `Admin@12345`. If you set a different `ADMIN_USERNAME` in `.env`, the backend also creates that admin on startup using `ADMIN_INITIAL_PASSWORD`. Existing accounts are never changed, so editing the password later does not reset it.
 - **`App.jsx` and `index.css` in the repo root are unused.** They're old uploads; the real ones are in `frontend/src/`.
+- **Clearing out test accounts:** stress tests, load tests and the API tests create throwaway users. `make k8s-cleanup-users` (Kubernetes) or `make cleanup-users` (Compose) deletes every account except `admin` and `jane`, together with their parcels, bookings and luggage, and frees their lockers. It runs in one transaction (`database/maintenance/cleanup-test-users.sql`).
 - **Kubernetes database:** it's a CloudNativePG cluster, not a single pod. `kubectl -n smart-locker get cluster locker-db` shows its health and current primary.

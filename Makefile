@@ -5,7 +5,8 @@ IMAGES = smart-locker-backend:local smart-locker-frontend:local smart-locker-con
 
 .PHONY: help env up down logs ps reset monitoring proto test \
         k8s-addons k8s-images k8s-secret k8s-up k8s-status k8s-down \
-        k8s-loadtest k8s-failover k8s-grafana k8s-prometheus k8s-app k8s-demo-on k8s-demo-off
+        k8s-loadtest k8s-failover k8s-grafana k8s-prometheus k8s-app k8s-demo-on k8s-demo-off \
+        cleanup-users k8s-cleanup-users
 
 help:
 	@echo "Docker Compose:"
@@ -17,6 +18,7 @@ help:
 	@echo "  make reset        stop everything AND delete the database volume"
 	@echo "  make test         run the API tests against the running stack"
 	@echo "  make proto        generate gRPC stubs locally (only for running outside Docker)"
+	@echo "  make cleanup-users     delete every account except admin and jane, with their data"
 	@echo "Kubernetes:"
 	@echo "  make k8s-addons   install metrics-server + CloudNativePG (once per cluster)"
 	@echo "  make k8s-images   build images and load them into minikube / kind"
@@ -28,6 +30,7 @@ help:
 	@echo "  make k8s-failover kill the database primary and watch a replica take over"
 	@echo "  make k8s-demo-on  let the admin dashboard run the demos (load test, failover, ...)"
 	@echo "  make k8s-demo-off take that permission away again"
+	@echo "  make k8s-cleanup-users the same on the Kubernetes database"
 	@echo "  make k8s-down     delete everything in the smart-locker namespace"
 
 env:
@@ -117,6 +120,14 @@ k8s-demo-on:
 
 k8s-demo-off:
 	kubectl delete -k kubernetes/demo-controls --ignore-not-found
+
+# Deletes every account except admin and jane (and real admins), with their
+# parcels, bookings and luggage; frees their lockers. One transaction.
+cleanup-users:
+	docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < database/maintenance/cleanup-test-users.sql
+
+k8s-cleanup-users:
+	kubectl -n smart-locker exec -i $$(kubectl -n smart-locker get cluster locker-db -o jsonpath='{.status.currentPrimary}') -c postgres -- psql -v ON_ERROR_STOP=1 -d locker_db < database/maintenance/cleanup-test-users.sql
 
 k8s-down:
 	kubectl delete namespace smart-locker
