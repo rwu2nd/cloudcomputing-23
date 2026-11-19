@@ -1,0 +1,157 @@
+# CI/CD for the Smart Locker system.
+#
+#   1. compose     build every image, start the stack with Docker Compose, run the API tests
+#   2. kubernetes  create a throwaway 3-node cluster (kind), install the add-ons,
+#                  deploy with `kubectl apply -k .`, run the tests, then kill the
+#                  database primary and check the app still works after failover
+#   3. publish     on pushes to main only: push the images to GitHub Container Registry
+#
+# Runs on every pull request and every push to main, or by hand (Actions tab).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose:
+    name: Build and test with Docker Compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env with a random database password
+        run: |
+          cp .env.example .env
+          sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+
+      - name: Build and start the stack
+        run: docker compose up -d --build --wait --wait-timeout 180
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install pytest requests
+
+      - name: API tests (including gRPC door unlocks)
+        run: python -m pytest tests/test_init.py tests/test_end_to_end.py -v
+
+      - name: Service logs
+        if: failure()
+        run: docker compose logs --no-color
+
+  kubernetes:
+    name: Deploy and test on Kubernetes (kind)
+    needs: compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env with a random database password
+        run: |
+          cp .env.example .env
+          sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+
+      - name: Create a 3-node kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: smart-locker
+          config: kubernetes/kind-cluster.yaml
+
+      - name: Build images and load them into the cluster
+        run: make k8s-images
+
+      - name: Install add-ons (metrics-server, CloudNativePG)
+        run: make k8s-addons
+
+      - name: Deploy
+        run: make k8s-up
+
+      - name: Wait until everything is running
+        run: |
+          kubectl -n smart-locker wait --for=condition=Ready cluster/locker-db --timeout=300s
+          for d in locker-db-pooler-rw backend locker-controller frontend prometheus grafana; do
+            kubectl -n smart-locker rollout status deployment/$d --timeout=180s
+          done
+          kubectl -n smart-locker get pods -o wide
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install pytest requests
+
+      - name: API tests against the cluster
+        run: |
+          kubectl -n smart-locker port-forward svc/backend 8000:8000 >/dev/null 2>&1 &
+          sleep 3
+          python -m pytest tests/test_init.py tests/test_end_to_end.py -v
+
+      - name: Kill the database primary and test again after failover
+        run: |
+          old=$(kubectl -n smart-locker get cluster locker-db -o jsonpath='{.status.currentPrimary}')
+          echo "Deleting primary $old"
+          kubectl -n smart-locker delete pod "$old" --wait=false
+          for _ in $(seq 1 60); do
+            new=$(kubectl -n smart-locker get cluster locker-db -o jsonpath='{.status.currentPrimary}')
+            phase=$(kubectl -n smart-locker get cluster locker-db -o jsonpath='{.status.phase}')
+            if [ "$new" != "$old" ] && [ "$phase" = "Cluster in healthy state" ]; then
+              echo "New primary: $new"
+              break
+            fi
+            sleep 5
+          done
+          [ "$new" != "$old" ] || { echo "No failover happened"; exit 1; }
+          kubectl -n smart-locker port-forward svc/backend 8000:8000 >/dev/null 2>&1 &
+          sleep 3
+          python -m pytest tests/test_end_to_end.py -v
+
+      - name: Cluster diagnostics
+        if: failure()
+        run: |
+          kubectl -n smart-locker get all,cluster,pooler,hpa,pdb
+          kubectl -n smart-locker describe pods
+          for d in backend locker-controller; do kubectl -n smart-locker logs deployment/$d --tail=100 || true; done
+
+  publish:
+    name: Publish images to GitHub Container Registry
+    needs: [compose, kubernetes]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        run: |
+          repo=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          short_sha=$(git rev-parse --short HEAD)
+          for svc in backend frontend locker-controller; do
+            image="$repo/$svc"
+            docker build -f "docker/$svc.Dockerfile" -t "$image:$short_sha" -t "$image:latest" .
+            docker push "$image:$short_sha"
+            docker push "$image:latest"
+          done
