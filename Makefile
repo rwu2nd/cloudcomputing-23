@@ -1,7 +1,7 @@
 # Optional shortcuts. Everything here is also documented as plain commands in
 # the README, so teammates without `make` (e.g. plain Windows) lose nothing.
 
-IMAGES = smart-locker-backend:local smart-locker-frontend:local smart-locker-controller:local
+IMAGES = smart-locker-backend:local smart-locker-frontend:local smart-locker-controller:local smart-locker-notifications:local
 
 .PHONY: help env up down logs ps reset monitoring proto test \
         k8s-addons k8s-images k8s-secret k8s-up k8s-status k8s-down \
@@ -69,7 +69,7 @@ k8s-addons:
 
 # Builds with Compose, then copies the images into the cluster's nodes.
 k8s-images:
-	docker compose build backend frontend locker-controller
+	docker compose build backend frontend locker-controller notification-service
 	@ctx=$$(kubectl config current-context); \
 	case "$$ctx" in \
 	  kind-*) for i in $(IMAGES); do kind load docker-image $$i --name $${ctx#kind-}; done ;; \

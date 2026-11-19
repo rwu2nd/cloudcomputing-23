@@ -20,6 +20,9 @@ data:
   # gRPC address of the locker-controller. The Service is headless, so dns:///
   # resolves to every controller pod and the backend balances calls itself.
   LOCKER_CONTROLLER_ADDR: dns:///locker-controller.smart-locker.svc.cluster.local:50051
+  # gRPC address of the notification service (full name: gRPC's own DNS
+  # resolver does not use the cluster's search domains).
+  NOTIFICATION_SERVICE_URL: notification-service.smart-locker.svc.cluster.local:50051
   # Keep in sync with POSTGRES_DB in your .env
   POSTGRES_DB: locker_db
   # Used by the frontend's nginx to forward /api/* (no trailing slash)

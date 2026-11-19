@@ -1,0 +1,89 @@
+# gRPC notification service (notification-service/): stores notifications in
+# PostgreSQL and streams new ones to the backend (StreamNotifications), which
+# forwards them to browsers as server-sent events.
+#
+# ONE replica on purpose: live streams are fanned out from an in-memory
+# subscriber list, so a notification sent through one pod would not reach a
+# browser whose stream is connected to another pod. Running more replicas
+# would need a shared pub/sub (e.g. PostgreSQL LISTEN/NOTIFY or Redis).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: smart-locker
+  labels:
+    app: notification-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+    spec:
+      enableServiceLinks: false
+      tolerations:
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+      containers:
+        - name: notification-service
+          image: smart-locker-notifications:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: grpc
+              containerPort: 50051
+          env:
+            - name: GRPC_PORT
+              value: "50051"
+            # Same database as the backend, through the PgBouncer pooler.
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: locker-config
+                  key: POSTGRES_HOST
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: locker-config
+                  key: POSTGRES_PORT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: locker-config
+                  key: POSTGRES_DB
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: locker-db-secret
+                  key: POSTGRES_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: locker-db-secret
+                  key: POSTGRES_PASSWORD
+          # The server does not implement the gRPC health protocol, so check
+          # that the port accepts connections instead.
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

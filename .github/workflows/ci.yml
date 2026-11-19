@@ -83,7 +83,7 @@ jobs:
       - name: Wait until everything is running
         run: |
           kubectl -n smart-locker wait --for=condition=Ready cluster/locker-db --timeout=300s
-          for d in locker-db-pooler-rw backend locker-controller frontend prometheus grafana; do
+          for d in locker-db-pooler-rw backend locker-controller notification-service frontend prometheus grafana; do
             kubectl -n smart-locker rollout status deployment/$d --timeout=180s
           done
           kubectl -n smart-locker get pods -o wide
@@ -155,3 +155,7 @@ jobs:
             docker push "$image:$short_sha"
             docker push "$image:latest"
           done
+          image="$repo/notification-service"
+          docker build -t "$image:$short_sha" -t "$image:latest" notification-service
+          docker push "$image:$short_sha"
+          docker push "$image:latest"

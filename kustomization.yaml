@@ -25,6 +25,9 @@ resources:
   - kubernetes/locker-controller/deployment.yaml
   - kubernetes/locker-controller/service.yaml
   - kubernetes/locker-controller/pdb.yaml
+  # Notification service (gRPC, streams notifications to the backend)
+  - kubernetes/notification-service/deployment.yaml
+  - kubernetes/notification-service/service.yaml
   # Frontend (nginx + React)
   - kubernetes/frontend/deployment.yaml
   - kubernetes/frontend/service.yaml

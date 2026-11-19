@@ -1,0 +1,15 @@
+# Internal address: notification-service:50051 (one pod, see deployment.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: smart-locker
+  labels:
+    app: notification-service
+spec:
+  selector:
+    app: notification-service
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
