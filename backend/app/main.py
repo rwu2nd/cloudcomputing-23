@@ -134,7 +134,6 @@ class CompartmentCreate(BaseModel):
 
 # create reservation, validates incoming request
 class ReservationCreate(BaseModel):
-    customer_id: str = Field(min_length=1, max_length=120)
     station_id: int = Field(gt=0)
     required_size: Size
 
@@ -566,34 +565,53 @@ def list_compartments(station_id: int):
     status_code=status.HTTP_202_ACCEPTED,
     tags=["reservations"],
 )
-def create_reservation(payload: ReservationCreate, user: dict = Depends(authenticated_user)):
-    """Queue a parcel for the one station selected by the user.
+@app.post(
+    "/api/reservations",
+    response_model=ReservationOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["reservations"],
+)
+def create_reservation(
+    payload: ReservationCreate,
+    user: dict = Depends(authenticated_user)
+):
+    """Queue a parcel for the station selected by the signed-in user."""
 
-    A background worker assigns the smallest fitting compartment after the
-    queue has been quiet for the batching interval. The response is initially
-    CONDITIONAL; the client can poll GET /api/reservations/{id} for the result.
-    """
-    if isinstance(user, dict) and user.get("username") and payload.customer_id.strip() != user["username"]:
-        raise HTTPException(status_code=403, detail="Reservations must be created for the signed-in account")
+    customer_id = str(user["id"])
+
     with db_connection() as conn, conn.cursor() as cur:
         _acquire_allocation_lock(cur)
+
         cur.execute(
             "SELECT id FROM locker WHERE id = %s AND active = TRUE",
             (payload.station_id,),
         )
+
         if cur.fetchone() is None:
-            raise HTTPException(status_code=422, detail="Unknown or inactive selected station")
+            raise HTTPException(
+                status_code=422,
+                detail="Unknown or inactive selected station"
+            )
 
         cur.execute(
             """INSERT INTO locker_reservations
                (id, customer_id, station_id, required_size, status, queue_order,
                 queue_updated_at, created_at)
-               VALUES (gen_random_uuid(), %s, %s, %s, 'CONDITIONAL',
-                       nextval('locker_queue_order_seq'), clock_timestamp(), clock_timestamp())
+               VALUES (
+                   gen_random_uuid(), %s, %s, %s, 'CONDITIONAL',
+                   nextval('locker_queue_order_seq'),
+                   clock_timestamp(), clock_timestamp()
+               )
                RETURNING id""",
-            (payload.customer_id.strip(), payload.station_id, payload.required_size.value),
+            (
+                customer_id,
+                payload.station_id,
+                payload.required_size.value,
+            ),
         )
+
         reservation_id = cur.fetchone()["id"]
+
         return _get_reservation(cur, reservation_id)
 
 
@@ -601,7 +619,7 @@ def create_reservation(payload: ReservationCreate, user: dict = Depends(authenti
 def get_reservation(reservation_id: UUID, user: dict = Depends(authenticated_user)):
     with db_connection() as conn, conn.cursor() as cur:
         reservation = _get_reservation(cur, reservation_id)
-        if reservation["customer_id"] != user["username"]:
+        if reservation["customer_id"] != str(user["id"]):
             raise HTTPException(status_code=403, detail="This reservation belongs to another account")
         return reservation
 
@@ -620,7 +638,7 @@ def list_reservations(status_filter: Optional[str] = None, user: dict = Depends(
                    FROM locker_reservations
                    WHERE status = %s AND customer_id = %s
                    ORDER BY created_at, id""",
-                (status_filter, user["username"]),
+                (status_filter, str(user["id"])),
             )
         else:
             cur.execute(
@@ -630,7 +648,7 @@ def list_reservations(status_filter: Optional[str] = None, user: dict = Depends(
                    FROM locker_reservations
                    WHERE customer_id = %s
                    ORDER BY created_at, id""",
-                (user["username"],),
+                (str(user["id"]),),
             )
         return cur.fetchall()
 
@@ -656,7 +674,7 @@ def mark_reservation_arrived(reservation_id: UUID, user: dict = Depends(authenti
     with db_connection() as conn, conn.cursor() as cur:
         _acquire_allocation_lock(cur)
         reservation = _get_reservation(cur, reservation_id, lock=True)
-        if reservation["customer_id"] != user["username"]:
+        if reservation["customer_id"] != str(user["id"]):
             raise HTTPException(status_code=403, detail="This parcel belongs to another account")
         if reservation["status"] == "ARRIVED":
             raise HTTPException(status_code=409, detail="Parcel has already been marked as arrived")
@@ -697,7 +715,7 @@ def list_parcels_for_collection(user: dict = Depends(authenticated_user)):
                    ON c.id = r.compartment_id
                WHERE r.status = 'ARRIVED' AND r.customer_id = %s
                ORDER BY r.arrived_at ASC""",
-            (user["username"],),
+            (str(user["id"]),),
         )
 
         return cur.fetchall()
@@ -714,7 +732,7 @@ def unlock_locker(
     with db_connection() as conn, conn.cursor() as cur:
         _acquire_allocation_lock(cur)
         reservation = _get_reservation(cur, reservation_id, lock=True)
-        if reservation["customer_id"] != user["username"]:
+        if reservation["customer_id"] != str(user["id"]):
             raise HTTPException(status_code=403, detail="This parcel belongs to another account")
 
         if reservation["status"] != "ARRIVED":
@@ -793,7 +811,7 @@ def fulfill_reservation(reservation_id: UUID, user: dict = Depends(authenticated
     with db_connection() as conn, conn.cursor() as cur:
         _acquire_allocation_lock(cur)
         reservation = _get_reservation(cur, reservation_id, lock=True)
-        if reservation["customer_id"] != user["username"]:
+        if reservation["customer_id"] != str(user["id"]):
             raise HTTPException(status_code=403, detail="This reservation belongs to another account")
         if reservation["status"] != "ALLOCATED":
             raise HTTPException(status_code=409, detail="Only allocated reservations can be fulfilled")
@@ -829,7 +847,7 @@ def cancel_reservation(reservation_id: UUID, user: dict = Depends(authenticated_
     with db_connection() as conn, conn.cursor() as cur:
         _acquire_allocation_lock(cur)
         reservation = _get_reservation(cur, reservation_id, lock=True)
-        if reservation["customer_id"] != user["username"]:
+        if reservation["customer_id"] != str(user["id"]):
             raise HTTPException(status_code=403, detail="This reservation belongs to another account")
         if reservation["status"] in ("FULFILLED", "CANCELLED"):
             raise HTTPException(status_code=409, detail=f"Cannot cancel reservation in {reservation['status']} state")
