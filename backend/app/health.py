@@ -11,9 +11,8 @@ manifests point at them) and keep their meaning:
                  it cannot (e.g. database down). Kubernetes then stops routing
                  requests to the pod without restarting it.
 """
-from contextlib import closing
-
 import psycopg2
+import socket
 
 from fastapi import APIRouter, Response, status
 
@@ -41,17 +40,16 @@ def check_database_reachable(timeout: float = 2.0) -> bool:
 
     settings = get_settings()
     try:
-        with closing(
-            psycopg2.connect(
-                host=settings.postgres_host,
-                port=settings.postgres_port,
-                dbname=settings.postgres_db,
-                user=settings.postgres_user,
-                password=settings.postgres_password,
-                connect_timeout=max(1, int(timeout)),
-                application_name="smart-locker-health",
-            )
-        ) as conn, conn.cursor() as cur:
+        with psycopg2.connect(
+            host=settings.postgres_host,
+            port=settings.postgres_port,
+            dbname=settings.postgres_db,
+            user=settings.postgres_user,
+            password=settings.postgres_password,
+            connect_timeout=max(1, int(timeout)),
+            application_name="smart-locker-health",
+        ) as conn:
+            with conn.cursor() as cur:
                 cur.execute("SELECT 1")
                 return cur.fetchone()[0] == 1
     except (psycopg2.Error, OSError, AttributeError):

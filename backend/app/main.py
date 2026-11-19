@@ -32,8 +32,6 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import Depends, FastAPI, HTTPException, Path, status
 from pydantic import BaseModel, Field, ConfigDict
-from app.db import db_connection
-from app.api_extra import router as extra_router
 
 from app.config import get_settings
 from app.health import router as health_router
@@ -82,12 +80,30 @@ END"""
 # ====================================
 
 # create database connection
-# (connection pooling lives in app/db.py; db_connection is imported above)
+def db_connection():
+    """Create a short-lived connection; PostgreSQL is the source of truth across replicas."""
+    s = get_settings()
+    return psycopg2.connect(
+        host=s.postgres_host,
+        port=s.postgres_port,
+        dbname=s.postgres_db,
+        user=s.postgres_user,
+        password=s.postgres_password,
+        connect_timeout=3,
+        application_name="smart-locker-api",
+        cursor_factory=RealDictCursor,
+    )
+
 
 
 def _acquire_allocation_lock(cur) -> None:
     """Serialize allocation decisions and releases across every API replica."""
     cur.execute("SELECT pg_advisory_xact_lock(%s::bigint)", (ALLOCATION_LOCK_KEY,))
+
+
+
+
+
 
 
 # ====================================
@@ -1205,8 +1221,3 @@ def api_index():
         "queue_policy": "larger parcel sizes first; FIFO by database queue_order for equal sizes",
         "queue_batch_window_ms": QUEUE_QUIET_PERIOD_MS,
     }
-
-
-# Registered last so the core routes above win on overlapping paths
-# (e.g. /api/parcels, /api/stations/{id}/availability).
-app.include_router(extra_router)
