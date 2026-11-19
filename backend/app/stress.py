@@ -170,3 +170,106 @@ def snapshot(since: Optional[datetime]) -> Optional[dict]:
             )
             luggage = {row["status"]: row["n"] for row in cur.fetchall()}
     return {"station_id": sid, "lockers": lockers, "reservations": reservations, "luggage": luggage}
+
+
+# ---------------------------------------------------------------- run reports
+
+def _ensure_reports_table(cur) -> None:
+    # Created on first use (like the notification service's table), so
+    # existing databases need no migration.
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS stress_reports (
+               run_name    TEXT PRIMARY KEY,
+               started_at  TIMESTAMPTZ NOT NULL,
+               finished_at TIMESTAMPTZ,
+               report      JSONB NOT NULL,
+               created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+           )"""
+    )
+
+
+def save_report(run_name: str, started: datetime, finished: Optional[datetime], report: dict) -> None:
+    import json
+    with _db_connection() as conn, conn.cursor() as cur:
+        _ensure_reports_table(cur)
+        cur.execute(
+            """INSERT INTO stress_reports (run_name, started_at, finished_at, report)
+               VALUES (%s, %s, %s, %s::jsonb)
+               ON CONFLICT (run_name) DO UPDATE SET report = EXCLUDED.report, finished_at = EXCLUDED.finished_at""",
+            (run_name, started, finished, json.dumps(report, default=str)),
+        )
+
+
+def get_report(run_name: str) -> Optional[dict]:
+    with _db_connection() as conn, conn.cursor() as cur:
+        _ensure_reports_table(cur)
+        cur.execute("SELECT report FROM stress_reports WHERE run_name = %s", (run_name,))
+        row = cur.fetchone()
+    return row["report"] if row else None
+
+
+def list_reports(limit: int = 30) -> list[dict]:
+    with _db_connection() as conn, conn.cursor() as cur:
+        _ensure_reports_table(cur)
+        cur.execute(
+            """SELECT run_name, started_at, finished_at,
+                      report -> 'config' AS config,
+                      report -> 'summary' AS summary
+               FROM stress_reports ORDER BY started_at DESC LIMIT %s""",
+            (limit,),
+        )
+        return cur.fetchall()
+
+
+def correctness(since: datetime, until: datetime) -> dict:
+    """Database-level checks for one run on the test lockers.
+
+    double_allocations: pairs of bookings/luggage sessions whose time holding
+    the same compartment overlapped. Every release path sets the final status
+    and updated_at in the same transaction, so for finished rows updated_at
+    is the moment the compartment was let go.
+    """
+    sid = station_id()
+    if sid is None:
+        return {}
+    with _db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """WITH holds AS (
+                   SELECT 'parcel' AS kind, r.id::text AS id, r.compartment_id,
+                          r.allocated_at AS held_from,
+                          CASE WHEN r.status IN ('FULFILLED', 'CANCELLED') THEN r.updated_at ELSE NOW() END AS held_to
+                   FROM locker_reservations r
+                   WHERE r.station_id = %(sid)s AND r.created_at BETWEEN %(since)s AND %(until)s
+                     AND r.compartment_id IS NOT NULL AND r.allocated_at IS NOT NULL
+                   UNION ALL
+                   SELECT 'luggage', ls.id::text, ls.compartment_id, ls.stored_at,
+                          CASE WHEN ls.status = 'RETRIEVED' THEN ls.retrieved_at
+                               WHEN ls.status = 'CANCELLED' THEN ls.updated_at ELSE NOW() END
+                   FROM luggage_sessions ls
+                   JOIN locker_compartments c ON c.id = ls.compartment_id
+                   WHERE c.station_id = %(sid)s AND ls.created_at BETWEEN %(since)s AND %(until)s
+               )
+               SELECT
+                   (SELECT count(*) FROM holds a JOIN holds b
+                      ON a.compartment_id = b.compartment_id AND a.id < b.id
+                     AND a.held_from < b.held_to AND b.held_from < a.held_to) AS double_allocations,
+                   (SELECT count(*) FROM holds) AS holds_checked,
+                   (SELECT count(*) FROM locker_compartments
+                     WHERE station_id = %(sid)s AND reserved_by IS NOT NULL) AS lockers_still_held,
+                   (SELECT count(*) FROM locker_reservations
+                     WHERE station_id = %(sid)s AND created_at BETWEEN %(since)s AND %(until)s
+                       AND status = 'FULFILLED') AS parcels_collected,
+                   (SELECT count(*) FROM locker_reservations
+                     WHERE station_id = %(sid)s AND created_at BETWEEN %(since)s AND %(until)s
+                       AND status = 'CANCELLED') AS parcels_cancelled,
+                   (SELECT count(*) FROM luggage_sessions ls JOIN locker_compartments c ON c.id = ls.compartment_id
+                     WHERE c.station_id = %(sid)s AND ls.created_at BETWEEN %(since)s AND %(until)s
+                       AND ls.status = 'RETRIEVED') AS luggage_collected,
+                   (SELECT count(*) FROM locker_reservations r JOIN locker s ON s.id = r.station_id
+                     WHERE s.zone <> %(zone)s AND r.created_at BETWEEN %(since)s AND %(until)s) AS real_bookings,
+                   (SELECT count(*) FROM locker_reservations r JOIN locker s ON s.id = r.station_id
+                     WHERE s.zone <> %(zone)s AND r.created_at BETWEEN %(since)s AND %(until)s
+                       AND r.status IN ('ALLOCATED', 'ARRIVED', 'FULFILLED')) AS real_bookings_ok""",
+            {"sid": sid, "since": since, "until": until, "zone": STRESS_ZONE},
+        )
+        return dict(cur.fetchone())

@@ -22,7 +22,7 @@ import os
 import ssl
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -103,6 +103,43 @@ def prom(query: str) -> Optional[list]:
         for r in payload.get("data", {}).get("result", [])
         if r["value"][1] not in ("NaN", "+Inf", "-Inf")
     ]
+
+
+def prom_at(query: str, at: float) -> Optional[float]:
+    """Instant query evaluated at a past moment (unix seconds)."""
+    url = f"{PROMETHEUS_URL}/api/v1/query?" + urllib.parse.urlencode({"query": query, "time": at})
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            result = json.loads(resp.read()).get("data", {}).get("result", [])
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return None
+    if not result or result[0]["value"][1] in ("NaN", "+Inf", "-Inf"):
+        return None
+    return float(result[0]["value"][1])
+
+
+def prom_by_at(query: str, label: str, at: float) -> dict:
+    url = f"{PROMETHEUS_URL}/api/v1/query?" + urllib.parse.urlencode({"query": query, "time": at})
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            result = json.loads(resp.read()).get("data", {}).get("result", [])
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return {}
+    return {r["metric"].get(label, "?"): round(float(r["value"][1])) for r in result
+            if r["value"][1] not in ("NaN", "+Inf", "-Inf") and float(r["value"][1]) >= 0.5}
+
+
+def prom_range(query: str, start: float, end: float, step: int = 5) -> list[tuple[float, float]]:
+    url = f"{PROMETHEUS_URL}/api/v1/query_range?" + urllib.parse.urlencode(
+        {"query": query, "start": start, "end": end, "step": step})
+    try:
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            result = json.loads(resp.read()).get("data", {}).get("result", [])
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return []
+    if not result:
+        return []
+    return [(float(t), float(v)) for t, v in result[0]["values"] if v not in ("NaN", "+Inf", "-Inf")]
 
 
 def prom_scalar(query: str) -> Optional[float]:
@@ -418,7 +455,8 @@ def start_stress(payload: StressRun, admin: dict = Depends(require_controls)):
         "metadata": {"name": name, "labels": {"app": "k6", "started-by": "admin-dashboard"},
                      "annotations": {CONFIG_ANNOTATION: json.dumps(config)}},
         "spec": {
-            "backoffLimit": 0, "ttlSecondsAfterFinished": 1800,
+            # Kept for a day: the run report is built from this pod's log.
+            "backoffLimit": 0, "ttlSecondsAfterFinished": 86400,
             "activeDeadlineSeconds": duration + 300,
             "template": {
                 "metadata": {"labels": {"app": "k6", "stress-run": name}},
@@ -517,3 +555,291 @@ def stress_status(admin: dict = Depends(require_admin_user)):
         },
         "console": _console(run["name"]) if run else [],
     }
+
+
+# ---------------------------------------------------------------- run reports
+#
+# A report for a finished stress run, built from three independent sources:
+#   * k6 (the clients): its end-of-run summary and its timestamped console
+#     lines, which give per-second timings of every failure and chaos step
+#   * Prometheus (the servers): requests, 5xx, latency and pod counts over the
+#     run and over each chaos window
+#   * PostgreSQL: correctness checks (no compartment ever held twice, no lost
+#     journeys, test lockers freed)
+# and scored against the SLOs below. Saved in the stress_reports table.
+
+SLOS = {
+    "availability_normal": 99.9,      # % of requests OK outside chaos windows
+    "availability_chaos": 97.0,       # % of requests OK during chaos windows
+    "max_outage_seconds": 10,         # longest user-visible outage per chaos event
+    "p95_normal_ms": 1000,            # p95 latency outside chaos windows
+}
+
+_LOG_LINE = re.compile(r'time="([^"]+)".*?msg="((?:[^"\\]|\\.)*)"')
+_FAIL = re.compile(r"FAILED|failed \(|sign-in failed|booking failed|ERROR")
+_OK = re.compile(r"-> collected|signed in and browsed|booked and cancelled \(ok\)|worked after")
+_DURATION = re.compile(r"([\d.]+)(µs|us|ms|s|m)")
+
+
+def _ms(text: str) -> Optional[float]:
+    m = _DURATION.fullmatch(text.strip())
+    if not m:
+        return None
+    value, unit = float(m.group(1)), m.group(2)
+    return round(value * {"µs": 0.001, "us": 0.001, "ms": 1, "s": 1000, "m": 60000}[unit], 1)
+
+
+def _k6_summary(text: str) -> dict:
+    out = {}
+    if m := re.search(r"http_reqs\.*:\s*(\d+)\s+([\d.]+)/s", text):
+        out["requests"], out["requests_per_second"] = int(m.group(1)), round(float(m.group(2)), 1)
+    if m := re.search(r"http_req_failed\.*:\s*([\d.]+)%\s+(\d+) out of (\d+)", text):
+        out["failed"], out["failed_percent"] = int(m.group(2)), float(m.group(1))
+        out["availability_percent"] = round(100 - float(m.group(1)), 2)
+    if m := re.search(r"http_req_duration\.*:\s*avg=(\S+)\s+p\(50\)=(\S+)\s+p\(95\)=(\S+)\s+p\(99\)=(\S+)\s+max=(\S+)", text):
+        out.update(avg_ms=_ms(m.group(1)), p50_ms=_ms(m.group(2)), p95_ms=_ms(m.group(3)),
+                   p99_ms=_ms(m.group(4)), max_ms=_ms(m.group(5)))
+    if m := re.search(r"checks_succeeded\.*:\s*([\d.]+)%", text):
+        out["checks_percent"] = float(m.group(1))
+    if m := re.search(r"iterations\.*:\s*(\d+)", text):
+        out["iterations"] = int(m.group(1))
+    return out
+
+
+def _log_events(text: str) -> list[tuple[datetime, str]]:
+    events = []
+    for line in text.splitlines():
+        m = _LOG_LINE.search(line)
+        if m:
+            events.append((datetime.fromisoformat(m.group(1).replace("Z", "+00:00")),
+                           m.group(2).replace('\\"', '"')))
+    return events
+
+
+def _chaos_events(events) -> list[dict]:
+    kinds = [("fails 40%", "faults_on"), ("faults cleared", "faults_off"),
+             ("controller stopped", "controller_down"), ("started again", "controller_up"),
+             ("killing the database primary", "failover")]
+    out = []
+    for t, text in events:
+        if not text.startswith("[chaos]") or "retrying" in text or "FAILED" in text:
+            continue
+        for needle, kind in kinds:
+            if needle in text:
+                out.append({"t": t, "kind": kind})
+    return out
+
+
+def _window_stats(events, a: datetime, b: datetime, settle: float = 60) -> dict:
+    """User-visible impact in [a, b], from the k6 console's per-second timestamps."""
+    fails = [t for t, text in events if a <= t <= b and _FAIL.search(text)]
+    if not fails:
+        return {"failures": 0, "outage_seconds": 0, "recovered_after_seconds": 0}
+    last = max(fails)
+    # First successful journey after the last failure: service is back.
+    recovered = next((t for t, text in events
+                      if t > last and (t - b).total_seconds() <= settle and _OK.search(text)), None)
+    return {
+        "failures": len(fails),
+        "outage_seconds": round((last - min(fails)).total_seconds()) + 1,
+        "first_failure_after_seconds": round((min(fails) - a).total_seconds()),
+        "recovered_after_seconds": round((recovered - a).total_seconds()) if recovered else None,
+    }
+
+
+def _server_window(a: datetime, b: datetime) -> dict:
+    seconds = max(1, int((b - a).total_seconds()))
+    end = b.timestamp()
+    total = prom_at(f'sum(increase(smartlocker_http_requests_total{{route!~"/health.*"}}[{seconds}s]))', end)
+    errors = prom_at(f'sum(increase(smartlocker_http_requests_total{{route!~"/health.*",status=~"5.."}}[{seconds}s]))', end) or 0
+    p95 = prom_at('histogram_quantile(0.95, sum by (le) (increase('
+                  f'smartlocker_http_request_duration_seconds_bucket{{route!~"/health.*"}}[{seconds}s])))', end)
+    return {
+        "requests": round(total) if total is not None else None,
+        "errors_5xx": round(errors),
+        "availability_percent": round(100 * (1 - errors / total), 2) if total else None,
+        "p95_ms": round(p95 * 1000) if p95 is not None else None,
+    }
+
+
+def build_report(run: dict) -> dict:
+    started = datetime.fromisoformat(run["started"].replace("Z", "+00:00"))
+    finished = datetime.fromisoformat((run.get("finished") or run["started"]).replace("Z", "+00:00"))
+    config = run.get("config") or {}
+    text = ""
+    pods = k8s("GET", f"/api/v1/namespaces/{_namespace()}/pods?"
+               + urllib.parse.urlencode({"labelSelector": f"job-name={run['name']}"})).get("items", [])
+    if pods:
+        text = k8s("GET", f"/api/v1/namespaces/{_namespace()}/pods/{pods[0]['metadata']['name']}/log",
+                   raw=True, missing_ok=True) or ""
+    events = _log_events(text)
+    chaos = _chaos_events(events)
+    first = lambda kind: next((c["t"] for c in chaos if c["kind"] == kind), None)
+
+    # ---- incidents, one per chaos event
+    incidents = []
+    if t := first("faults_on"):
+        off = first("faults_off") or finished
+        injected = prom_at(f'sum(increase(locker_controller_unlocks_total{{outcome="injected_failure"}}[{max(1, int((off - t).total_seconds()))}s]))', off.timestamp())
+        unlock_fail = [x for x in events if t <= x[0] <= off and "unlock" in x[1] and ("FAILED" in x[1] or "failed (" in x[1])]
+        incidents.append({"kind": "faults", "label": "40% controller faults", "at_seconds": round((t - started).total_seconds()),
+                          "duration_seconds": round((off - t).total_seconds()),
+                          "injected_faults": round(injected) if injected is not None else None,
+                          "unlocks_failed_for_users": len(unlock_fail),
+                          **{k: v for k, v in _window_stats(events, t, off).items() if k == "failures"}})
+    if t := first("controller_down"):
+        up = first("controller_up") or finished
+        # Stop at the next chaos event, so a later failover is not counted here.
+        next_event = min([c["t"] for c in chaos if c["t"] > up] + [finished, up + timedelta(seconds=45)])
+        stats = _window_stats(events, t, next_event)
+        # Recovery = from restore to the first door that opens again.
+        reopened = next((x for x, text in events
+                         if x > up and ("door opened by" in text or "worked after" in text)), None)
+        seconds = max(1, int((up - t).total_seconds()))
+        blast = prom_by_at(f'sum by (route) (increase(smartlocker_http_requests_total{{status=~"5.."}}[{seconds}s]))', "route", up.timestamp())
+        door_routes = ("/unlock", "/api/luggage/sessions")
+        incidents.append({"kind": "controller", "label": "Door controller outage", "at_seconds": round((t - started).total_seconds()),
+                          "duration_seconds": round((up - t).total_seconds()), **stats,
+                          "recovered_after_restore_seconds": round((reopened - up).total_seconds()) if reopened else None,
+                          "errors_by_route": blast,
+                          "isolated": all(any(d in r for d in door_routes) for r in blast)})
+    if t := first("failover"):
+        later = [c["t"] for c in chaos if c["t"] > t]
+        end = min([finished] + later + [t + timedelta(seconds=90)])
+        stats = _window_stats(events, t, end)
+        incidents.append({"kind": "failover", "label": "Database primary killed", "at_seconds": round((t - started).total_seconds()),
+                          **stats, "errors_by_route": prom_by_at(
+                              f'sum by (route) (increase(smartlocker_http_requests_total{{status=~"5.."}}[{max(1, int((end - t).total_seconds()))}s]))',
+                              "route", end.timestamp())})
+
+    # ---- phases: before / during / after chaos (server side)
+    phases = []
+    if chaos:
+        chaos_start = min(c["t"] for c in chaos)
+        chaos_end = min(finished, max(c["t"] for c in chaos) + timedelta(seconds=30))
+        for name, a, b in (("before chaos", started, chaos_start), ("during chaos", chaos_start, chaos_end),
+                           ("after chaos", chaos_end, finished)):
+            if (b - a).total_seconds() >= 15:
+                phases.append({"name": name, "from_seconds": round((a - started).total_seconds()),
+                               "to_seconds": round((b - started).total_seconds()), **_server_window(a, b)})
+    else:
+        phases.append({"name": "whole run", "from_seconds": 0,
+                       "to_seconds": round((finished - started).total_seconds()), **_server_window(started, finished)})
+
+    # ---- scaling
+    pods_series = prom_range('count(up{app="backend"} == 1)', started.timestamp(), finished.timestamp())
+    scaling = None
+    if pods_series:
+        initial = pods_series[0][1]
+        peak = max(v for _, v in pods_series)
+        scaling = {"initial_pods": int(initial), "peak_pods": int(peak),
+                   "first_scale_out_seconds": next((round(t - started.timestamp()) for t, v in pods_series if v > initial), None),
+                   "peak_reached_seconds": next((round(t - started.timestamp()) for t, v in pods_series if v == peak), None)}
+    rps_series = prom_range('sum(rate(smartlocker_http_requests_total{route!~"/health.*"}[30s]))',
+                            started.timestamp(), finished.timestamp())
+
+    # ---- journeys and correctness
+    seen_parcels = sum(1 for _, x in events if x.startswith("[parcel]") and "-> collected" in x)
+    seen_luggage = sum(1 for _, x in events if x.startswith("[luggage]") and "-> collected" in x)
+    db = stress.correctness(started, finished)
+    journeys = {
+        "parcels_collected_seen_by_clients": seen_parcels,
+        "parcels_collected_in_database": db.get("parcels_collected"),
+        "luggage_collected_seen_by_clients": seen_luggage,
+        "luggage_collected_in_database": db.get("luggage_collected"),
+        "lost": max(0, seen_parcels - (db.get("parcels_collected") or 0)) + max(0, seen_luggage - (db.get("luggage_collected") or 0)),
+        "unlock_retries": sum(1 for _, x in events if "retrying" in x and "unlock" in x),
+        "unlocks_recovered_by_retry": sum(1 for _, x in events if "worked after" in x),
+        "unlocks_given_up": sum(1 for _, x in events if "FAILED for 45 s" in x),
+    }
+
+    # ---- SLO scorecard
+    normal = [p for p in phases if p["name"] != "during chaos"]
+    normal_req = sum(p["requests"] or 0 for p in normal)
+    normal_err = sum(p["errors_5xx"] or 0 for p in normal)
+    slo = []
+
+    def add(name, target, measured, ok, unit=""):
+        slo.append({"name": name, "target": target, "measured": measured, "unit": unit,
+                    "pass": None if measured is None else bool(ok)})
+
+    avail_normal = round(100 * (1 - normal_err / normal_req), 2) if normal_req else None
+    add("Availability outside chaos", f"≥ {SLOS['availability_normal']}%", avail_normal,
+        avail_normal is not None and avail_normal >= SLOS["availability_normal"], "%")
+    during = next((p for p in phases if p["name"] == "during chaos"), None)
+    if during:
+        add("Availability during chaos", f"≥ {SLOS['availability_chaos']}%", during["availability_percent"],
+            during["availability_percent"] is not None and during["availability_percent"] >= SLOS["availability_chaos"], "%")
+    outages = [i["outage_seconds"] for i in incidents if i["kind"] in ("controller", "failover") and "outage_seconds" in i]
+    if outages:
+        worst = max(outages)
+        # The controller outage lasts as long as the test keeps it down; what
+        # matters is how fast things work again once it is back.
+        ctl = next((i for i in incidents if i["kind"] == "controller"), None)
+        fo = next((i for i in incidents if i["kind"] == "failover"), None)
+        if fo:
+            add("Outage after DB primary killed", f"≤ {SLOS['max_outage_seconds']} s", fo.get("outage_seconds"),
+                fo.get("outage_seconds", 0) <= SLOS["max_outage_seconds"], "s")
+        if ctl:
+            r = ctl.get("recovered_after_restore_seconds")
+            add("Unlocks working again after controller restore", f"≤ {SLOS['max_outage_seconds']} s", r,
+                r is not None and r <= SLOS["max_outage_seconds"], "s")
+            add("Controller outage only affected door unlocks", "yes", "yes" if ctl["isolated"] else "no", ctl["isolated"])
+    f = next((i for i in incidents if i["kind"] == "faults"), None)
+    if f:
+        add("Unlock failures seen by users during 40% faults", "0", f["unlocks_failed_for_users"], f["unlocks_failed_for_users"] == 0)
+    p95_normal = max((p["p95_ms"] for p in normal if p["p95_ms"] is not None), default=None)
+    add("p95 latency outside chaos", f"≤ {SLOS['p95_normal_ms']} ms", p95_normal,
+        p95_normal is not None and p95_normal <= SLOS["p95_normal_ms"], "ms")
+    add("Compartments ever held by two bookings", "0", db.get("double_allocations"), db.get("double_allocations") == 0)
+    add("Completed journeys missing from the database", "0", journeys["lost"], journeys["lost"] == 0)
+    add("Test lockers still held after the run", "0", db.get("lockers_still_held"), db.get("lockers_still_held") == 0)
+
+    client = _k6_summary(text)
+    report = {
+        "run": run["name"], "started": started.isoformat(), "finished": finished.isoformat(),
+        "duration_seconds": round((finished - started).total_seconds()),
+        "config": config, "client": client, "phases": phases, "incidents": incidents,
+        "scaling": scaling,
+        "peak_requests_per_second": round(max(v for _, v in rps_series), 1) if rps_series else None,
+        "journeys": journeys, "correctness": db, "slo": slo,
+    }
+    scored = [x for x in slo if x["pass"] is not None]
+    report["summary"] = {
+        "availability_percent": client.get("availability_percent"),
+        "requests": client.get("requests"),
+        "p95_ms": client.get("p95_ms"),
+        "peak_pods": scaling["peak_pods"] if scaling else None,
+        "slo_passed": sum(1 for x in scored if x["pass"]), "slo_total": len(scored),
+    }
+    return report
+
+
+@router.get("/stress/report")
+def stress_report(run: Optional[str] = None, refresh: bool = False, admin: dict = Depends(require_admin_user)):
+    """Report for a finished run (the latest one by default). Built once, then stored."""
+    if run and not refresh:
+        stored = stress.get_report(run)
+        if stored:
+            return stored
+    latest = _latest_loadtest() if in_kubernetes() else None
+    if latest is None or (run and latest["name"] != run):
+        if run:
+            stored = stress.get_report(run)
+            if stored:
+                return stored
+        raise HTTPException(status_code=404, detail="No report for that run (reports are built for runs on Kubernetes)")
+    if latest["state"] not in ("succeeded", "failed"):
+        raise HTTPException(status_code=409, detail="The run has not finished yet")
+    if not refresh and (stored := stress.get_report(latest["name"])):
+        return stored
+    report = build_report(latest)
+    stress.save_report(latest["name"], datetime.fromisoformat(latest["started"].replace("Z", "+00:00")),
+                       datetime.fromisoformat(latest["finished"].replace("Z", "+00:00")) if latest.get("finished") else None,
+                       report)
+    return report
+
+
+@router.get("/stress/reports")
+def stress_reports(admin: dict = Depends(require_admin_user)):
+    return stress.list_reports()
