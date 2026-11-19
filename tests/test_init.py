@@ -1,3 +1,4 @@
+# run in powershell to test: python -m pytest tests/test_init.py -v -s
 
 import os
 
