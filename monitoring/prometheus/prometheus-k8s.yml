@@ -1,0 +1,51 @@
+# Prometheus scrape config for Kubernetes.
+#
+# Instead of a fixed target list, Prometheus asks the Kubernetes API for the
+# pods in the smart-locker namespace and scrapes every pod annotated with
+#   prometheus.io/scrape: "true"
+#   prometheus.io/port:   "<metrics port>"
+#   prometheus.io/path:   "/metrics"        (optional)
+# Pods that the autoscaler adds or removes are picked up automatically.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: smart-locker-pods
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [smart-locker]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__meta_kubernetes_pod_phase]
+        action: drop
+        regex: (Pending|Succeeded|Failed)
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        regex: (.+)
+        target_label: __metrics_path__
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      # Readable labels for dashboards.
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: app
+      # CloudNativePG pods have no "app" label; call them postgres and keep
+      # their current role (primary / replica) so failovers are visible.
+      - source_labels: [__meta_kubernetes_pod_label_cnpg_io_cluster]
+        regex: .+
+        target_label: app
+        replacement: postgres
+      - source_labels: [__meta_kubernetes_pod_label_cnpg_io_instanceRole]
+        target_label: role
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

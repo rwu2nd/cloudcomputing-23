@@ -7,6 +7,7 @@
 #   docker compose up --build
 #
 # Optional extras:
+#   docker compose --profile monitoring up -d       # + Prometheus and Grafana
 #   docker compose up -d --scale locker-controller=2   # gRPC load balancing
 #
 # Requires Docker Compose v2.17 or newer (uses `depends_on.restart`).
@@ -124,5 +125,35 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+  # ---- Monitoring (only with: docker compose --profile monitoring up -d) ----
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2d
+    volumes:
+      - ./monitoring/prometheus/prometheus-compose.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:13.0.12
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    environment:
+      # Dashboards are viewable without logging in (admin / admin to edit).
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/smart-locker.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${GRAFANA_HOST_PORT:-3001}:3000"
+    depends_on:
+      - prometheus
+
 volumes:
   postgres_data:
