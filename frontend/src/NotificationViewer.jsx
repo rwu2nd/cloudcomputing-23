@@ -248,6 +248,7 @@ export default function NotificationViewer({ accessToken, account, onBack }) {
               </ol>}
           </section>
         </div>
+*/}
       </div>
     </>
   );
