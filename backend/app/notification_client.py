@@ -4,7 +4,11 @@ import sys
 import grpc
 from google.protobuf.json_format import MessageToDict
 
-sys.path.insert(0, os.getenv("PROTO_DIR", "/app/proto"))
+_here = os.path.dirname(os.path.abspath(__file__))
+for _d in (os.getenv("PROTO_DIR"), os.path.join(_here, "proto"), "/app/proto"):
+    if _d and os.path.isfile(os.path.join(_d, "notification.proto")):
+        sys.path.insert(0, _d)
+        break
 pb2 = grpc.protos("notification.proto")
 pb2_grpc = grpc.services("notification.proto")
 
