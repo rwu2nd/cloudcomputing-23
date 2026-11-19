@@ -280,9 +280,15 @@ def grpc_burst(payload: GrpcBurst, admin: dict = Depends(require_admin_user)):
 def _latest_loadtest():
     data = k8s("GET", f"/apis/batch/v1/namespaces/{_namespace()}/jobs?labelSelector=app%3Dk6")
     jobs = sorted(data.get("items", []), key=lambda j: j["metadata"]["creationTimestamp"])
-    if not jobs:
-        return None
-    job = jobs[-1]
+    return _run_info(jobs[-1]) if jobs else None
+
+
+def _loadtest(name: str):
+    job = k8s("GET", f"/apis/batch/v1/namespaces/{_namespace()}/jobs/{name}", missing_ok=True)
+    return _run_info(job) if job else None
+
+
+def _run_info(job: dict) -> dict:
     st = job.get("status", {})
     state = ("running" if st.get("active") else
              "succeeded" if st.get("succeeded") else
@@ -573,7 +579,56 @@ SLOS = {
     "availability_chaos": 97.0,       # % of requests OK during chaos windows
     "max_outage_seconds": 10,         # longest user-visible outage per chaos event
     "p95_normal_ms": 1000,            # p95 latency outside chaos windows
+    "journey_success": 99.0,          # % of user journeys that completed in the end
 }
+
+# How the k6 console reports a journey that ended because something broke.
+# Journeys that just found no free locker are contention, not failures.
+_JOURNEY_FAILED = {
+    "parcel": re.compile(r"could not assign|booking failed|arrive failed|FAILED for 45 s"),
+    "luggage": re.compile(r"store FAILED|luggage in \S+ FAILED"),
+    "churn": re.compile(r"booking failed|booked and cancelled \((?!ok\))"),
+}
+_JOURNEY_CONTENTION = {
+    "parcel": re.compile(r"gave up and cancelled"),
+    "luggage": re.compile(r"lost \S+ to someone faster|every test XL locker busy"),
+}
+
+
+def _journey_success(run_name: str, config: dict, events, started, finished, client_text: str) -> dict:
+    """Did each user's journey complete in the end (retries included)?"""
+    db = stress.journey_counts(run_name.removeprefix("stress-"), started, finished)
+    lines = {name: [x for _, x in events if x.startswith(f"[{name}]")] for name in ("parcel", "luggage", "churn")}
+    completed = {
+        "parcel": db.get("parcel", {}).get("FULFILLED", 0),
+        "luggage": db.get("luggage", {}).get("RETRIEVED", 0),
+        # Each churn cycle ends with the booking cancelled on purpose.
+        "churn": db.get("churn", {}).get("CANCELLED", 0),
+    }
+    by_scenario = {}
+    for name in ("parcel", "luggage", "churn"):
+        if name not in (config.get("scenarios") or []):
+            continue
+        failed = sum(1 for x in lines[name] if _JOURNEY_FAILED[name].search(x))
+        contention = sum(1 for x in lines[name] if name in _JOURNEY_CONTENTION and _JOURNEY_CONTENTION[name].search(x))
+        done = completed[name]
+        by_scenario[name] = {
+            "completed": done, "failed": failed, "no_free_locker": contention,
+            "success_percent": round(100 * done / (done + failed), 2) if done + failed else None,
+        }
+    if "browse" in (config.get("scenarios") or []):
+        m = re.search(r"login: 200\s*\n\s*↳\s*[\d.]+%\s*—\s*✓\s*(\d+)\s*/\s*✗\s*(\d+)", client_text)
+        ok, bad = (int(m.group(1)), int(m.group(2))) if m else (None, 0)
+        by_scenario["browse"] = {"completed": ok, "failed": bad,
+                                 "success_percent": round(100 * ok / (ok + bad), 2) if ok is not None and ok + bad else (100.0 if m is None and "✓ login: 200" in client_text else None)}
+    core = [v for k, v in by_scenario.items() if k != "browse"]
+    done = sum(v["completed"] for v in core)
+    failed = sum(v["failed"] for v in core)
+    return {
+        "by_scenario": by_scenario,
+        "completed": done, "failed": failed,
+        "success_percent": round(100 * done / (done + failed), 2) if done + failed else None,
+    }
 
 _LOG_LINE = re.compile(r'time="([^"]+)".*?msg="((?:[^"\\]|\\.)*)"')
 _FAIL = re.compile(r"FAILED|failed \(|sign-in failed|booking failed|ERROR")
@@ -753,6 +808,8 @@ def build_report(run: dict) -> dict:
         "unlocks_given_up": sum(1 for _, x in events if "FAILED for 45 s" in x),
     }
 
+    journey_success = _journey_success(run["name"], config, events, started, finished, text)
+
     # ---- SLO scorecard
     normal = [p for p in phases if p["name"] != "during chaos"]
     normal_req = sum(p["requests"] or 0 for p in normal)
@@ -763,6 +820,9 @@ def build_report(run: dict) -> dict:
         slo.append({"name": name, "target": target, "measured": measured, "unit": unit,
                     "pass": None if measured is None else bool(ok)})
 
+    if journey_success["success_percent"] is not None:
+        add("User journeys completed in the end (parcel, luggage, churn)", f"≥ {SLOS['journey_success']}%",
+            journey_success["success_percent"], journey_success["success_percent"] >= SLOS["journey_success"], "%")
     avail_normal = round(100 * (1 - normal_err / normal_req), 2) if normal_req else None
     add("Availability outside chaos", f"≥ {SLOS['availability_normal']}%", avail_normal,
         avail_normal is not None and avail_normal >= SLOS["availability_normal"], "%")
@@ -802,11 +862,12 @@ def build_report(run: dict) -> dict:
         "config": config, "client": client, "phases": phases, "incidents": incidents,
         "scaling": scaling,
         "peak_requests_per_second": round(max(v for _, v in rps_series), 1) if rps_series else None,
-        "journeys": journeys, "correctness": db, "slo": slo,
+        "journeys": journeys, "journey_success": journey_success, "correctness": db, "slo": slo,
     }
     scored = [x for x in slo if x["pass"] is not None]
     report["summary"] = {
         "availability_percent": client.get("availability_percent"),
+        "journey_success_percent": journey_success["success_percent"],
         "requests": client.get("requests"),
         "p95_ms": client.get("p95_ms"),
         "peak_pods": scaling["peak_pods"] if scaling else None,
@@ -822,12 +883,14 @@ def stress_report(run: Optional[str] = None, refresh: bool = False, admin: dict 
         stored = stress.get_report(run)
         if stored:
             return stored
-    latest = _latest_loadtest() if in_kubernetes() else None
-    if latest is None or (run and latest["name"] != run):
-        if run:
-            stored = stress.get_report(run)
-            if stored:
-                return stored
+    latest = None
+    if in_kubernetes():
+        latest = _loadtest(run) if run else _latest_loadtest()
+    if latest is None:
+        # The job (and its log) is gone; fall back to the stored report.
+        stored = stress.get_report(run) if run else None
+        if stored:
+            return stored
         raise HTTPException(status_code=404, detail="No report for that run (reports are built for runs on Kubernetes)")
     if latest["state"] not in ("succeeded", "failed"):
         raise HTTPException(status_code=409, detail="The run has not finished yet")

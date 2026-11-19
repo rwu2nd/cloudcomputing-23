@@ -273,3 +273,32 @@ def correctness(since: datetime, until: datetime) -> dict:
             {"sid": sid, "since": since, "until": until, "zone": STRESS_ZONE},
         )
         return dict(cur.fetchone())
+
+
+def journey_counts(run_id: str, since: datetime, until: datetime) -> dict:
+    """Finished journeys per scenario for one run, from the database.
+
+    Stress accounts are named stress-<run>-<scenario>-<n>, so each booking and
+    luggage session can be traced back to the scenario that made it.
+    """
+    pattern = f"{STRESS_PREFIX}{run_id}-%"
+    out: dict[str, dict[str, int]] = {}
+    with _db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT split_part(u.username, '-', 3) AS scenario, r.status, count(*) AS n
+               FROM locker_reservations r JOIN "user" u ON u.id::text = r.customer_id
+               WHERE u.username LIKE %s AND r.created_at BETWEEN %s AND %s
+               GROUP BY 1, 2""",
+            (pattern, since, until),
+        )
+        for row in cur.fetchall():
+            out.setdefault(row["scenario"], {})[row["status"]] = row["n"]
+        cur.execute(
+            """SELECT ls.status, count(*) AS n
+               FROM luggage_sessions ls JOIN "user" u ON u.id = ls.user_id
+               WHERE u.username LIKE %s AND ls.created_at BETWEEN %s AND %s
+               GROUP BY 1""",
+            (pattern, since, until),
+        )
+        out["luggage"] = {row["status"]: row["n"] for row in cur.fetchall()}
+    return out
