@@ -47,6 +47,10 @@ spec:
                 configMapKeyRef:
                   name: locker-config
                   key: BACKEND_URL
+            # nginx forwards /grafana/ here. Full name, because nginx's own
+            # resolver does not use the cluster's DNS search domains.
+            - name: GRAFANA_URL
+              value: http://grafana.smart-locker.svc.cluster.local:3000
           readinessProbe:
             httpGet:
               path: /healthz

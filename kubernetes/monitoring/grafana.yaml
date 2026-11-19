@@ -2,7 +2,8 @@
 # Overview" dashboard provisioned from monitoring/grafana/ (same files as Compose).
 #
 # Open it:  kubectl -n smart-locker port-forward svc/grafana 3001:3000
-#           then http://localhost:3001 (viewable without login; admin / admin to edit)
+#           then http://localhost:3001/grafana/ (viewable without login; admin / admin to edit)
+# It is also reachable through the app itself at /grafana/ (see docker/nginx).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,12 +31,20 @@ spec:
               value: Viewer
             - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
               value: /var/lib/grafana/dashboards/smart-locker.json
+            # Served under /grafana/ by the frontend's nginx, so the admin
+            # dashboard can embed panels from the same address as the app.
+            - name: GF_SERVER_ROOT_URL
+              value: "%(protocol)s://%(domain)s:%(http_port)s/grafana/"
+            - name: GF_SERVER_SERVE_FROM_SUB_PATH
+              value: "true"
+            - name: GF_SECURITY_ALLOW_EMBEDDING
+              value: "true"
           ports:
             - name: http
               containerPort: 3000
           readinessProbe:
             httpGet:
-              path: /api/health
+              path: /grafana/api/health
               port: http
             periodSeconds: 10
           # Grafana uses ~220Mi when idle and more while a 5s-refresh dashboard

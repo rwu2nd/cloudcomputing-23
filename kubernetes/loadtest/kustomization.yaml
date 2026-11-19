@@ -5,14 +5,11 @@
 #   kubectl -n smart-locker delete job k6-load-test --ignore-not-found
 #   kubectl apply -k kubernetes/loadtest
 #   kubectl -n smart-locker logs -f job/k6-load-test
+#
+# The script itself (smart-locker.js) is shipped as the k6-script ConfigMap by
+# the main kustomization, so the admin dashboard can start tests too.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: smart-locker
 resources:
   - job.yaml
-configMapGenerator:
-  - name: k6-script
-    options:
-      disableNameSuffixHash: true
-    files:
-      - smart-locker.js

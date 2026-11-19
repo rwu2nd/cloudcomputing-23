@@ -110,6 +110,8 @@ services:
     environment:
       # nginx forwards /api/* to this URL (no trailing slash).
       BACKEND_URL: http://backend:8000
+      # /grafana/ is forwarded here (only answers with --profile monitoring).
+      GRAFANA_URL: http://grafana:3000
     ports:
       # Same BIND_ADDRESS rule as the backend. The database port above is deliberately
       # NOT affected: PostgreSQL is never opened to the network.
@@ -147,6 +149,10 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/smart-locker.json
+      # Served under /grafana/ (directly on :3001, and through the app's nginx).
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s:%(http_port)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro

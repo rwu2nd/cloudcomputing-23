@@ -1,0 +1,41 @@
+# DEMO ONLY. Lets the backend run the admin dashboard's demo actions:
+#   start/stop the k6 load test       (jobs: create, delete)
+#   kill the database primary         (pods: delete)
+#   stop/start the locker-controller  (deployments/scale: patch)
+#   inject controller faults          (deployments: patch)
+# A real API should never be able to do this to its own cluster. Remove it
+# again with `make k8s-demo-off`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backend-demo-actions
+  namespace: smart-locker
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["locker-controller"]
+    verbs: ["patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames: ["locker-controller"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "deletecollection"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backend-demo-actions
+  namespace: smart-locker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: backend-demo-actions
+subjects:
+  - kind: ServiceAccount
+    name: backend
+    namespace: smart-locker

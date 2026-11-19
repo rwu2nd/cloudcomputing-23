@@ -29,7 +29,9 @@ FROM nginx:1.27-alpine
 COPY docker/nginx/default.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist /usr/share/nginx/html
 
-# Fallback only. docker-compose.yml and the Kubernetes ConfigMap override it.
-ENV BACKEND_URL=http://backend:8000
+# Fallbacks only. docker-compose.yml and the Kubernetes manifests override them.
+ENV BACKEND_URL=http://backend:8000 \
+    GRAFANA_URL=http://grafana:3000 \
+    NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1
 
 EXPOSE 80

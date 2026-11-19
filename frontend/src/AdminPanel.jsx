@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import AssignParcels from "./AssignParcels.jsx";
+import CloudDemo from "./CloudDemos.jsx";
 
 const API = import.meta.env.VITE_API_BASE_URL ?? "/api";
 async function adminFetch(path, token, opts = {}) {
@@ -35,9 +36,9 @@ const scenarios = [
     "Concurrency Test",
     "Race real arrivals and verify allocations",
   ],
-  ["balancing", "Load Balancing", "Awaiting pod instrumentation"],
-  ["scalability", "Scalability", "Awaiting scaling metrics"],
-  ["fault", "Fault Tolerance", "Awaiting Kubernetes test hooks"],
+  ["balancing", "Load Balancing", "See which pods answer HTTP and gRPC calls"],
+  ["scalability", "Scalability", "Load test the backend and watch it autoscale"],
+  ["fault", "Fault Tolerance", "Kill the database primary or the door controller"],
 ];
 
 function GroupEditor({ value, onChange, locations }) {
@@ -372,12 +373,7 @@ export default function AdminPanel({ accessToken, account, onLogout }) {
                 )}
               </div>
             ) : (
-              <div className="panel">
-                <p>
-                  This test is awaiting its real runner and metrics integration.
-                  No simulated passing results will be displayed.
-                </p>
-              </div>
+              <CloudDemo page={page} request={adminRequest} />
             )}
           </>
         )}

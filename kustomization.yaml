@@ -20,6 +20,7 @@ resources:
   - kubernetes/backend/service.yaml
   - kubernetes/backend/hpa.yaml
   - kubernetes/backend/pdb.yaml
+  - kubernetes/backend/rbac.yaml
   # Locker controller (gRPC, simulated door hardware)
   - kubernetes/locker-controller/deployment.yaml
   - kubernetes/locker-controller/service.yaml
@@ -53,3 +54,9 @@ configMapGenerator:
   - name: grafana-dashboards
     files:
       - monitoring/grafana/dashboards/smart-locker.json
+  # k6 script for load tests started from the admin dashboard or `make k8s-loadtest`.
+  - name: k6-script
+    options:
+      disableNameSuffixHash: true
+    files:
+      - kubernetes/loadtest/smart-locker.js

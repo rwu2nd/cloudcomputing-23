@@ -5,7 +5,7 @@ IMAGES = smart-locker-backend:local smart-locker-frontend:local smart-locker-con
 
 .PHONY: help env up down logs ps reset monitoring proto test \
         k8s-addons k8s-images k8s-secret k8s-up k8s-status k8s-down \
-        k8s-loadtest k8s-failover k8s-grafana k8s-prometheus k8s-app
+        k8s-loadtest k8s-failover k8s-grafana k8s-prometheus k8s-app k8s-demo-on k8s-demo-off
 
 help:
 	@echo "Docker Compose:"
@@ -23,9 +23,11 @@ help:
 	@echo "  make k8s-up       create the Secrets and apply all manifests"
 	@echo "  make k8s-status   show pods, autoscaler and database cluster"
 	@echo "  make k8s-app      open the app on http://localhost:8080"
-	@echo "  make k8s-grafana  open Grafana on http://localhost:3001"
+	@echo "  make k8s-grafana  open Grafana on http://localhost:3001/grafana/ (also at /grafana/ in the app)"
 	@echo "  make k8s-loadtest run the k6 load test inside the cluster"
 	@echo "  make k8s-failover kill the database primary and watch a replica take over"
+	@echo "  make k8s-demo-on  let the admin dashboard run the demos (load test, failover, ...)"
+	@echo "  make k8s-demo-off take that permission away again"
 	@echo "  make k8s-down     delete everything in the smart-locker namespace"
 
 env:
@@ -89,6 +91,7 @@ k8s-app:
 	kubectl -n smart-locker port-forward svc/frontend 8080:80
 
 k8s-grafana:
+	@echo "Grafana: http://localhost:3001/grafana/"
 	kubectl -n smart-locker port-forward svc/grafana 3001:3000
 
 k8s-prometheus:
@@ -106,6 +109,14 @@ k8s-failover:
 	kubectl -n smart-locker delete pod $$primary --wait=false; \
 	echo "Watching instances (Ctrl+C to stop). A replica becomes primary within seconds:"; \
 	kubectl -n smart-locker get pods -l cnpg.io/cluster=locker-db -L role -w
+
+# Gives the backend the extra (demo-only) permissions behind the admin
+# dashboard's buttons. Takes effect within a few seconds, no restart needed.
+k8s-demo-on:
+	kubectl apply -k kubernetes/demo-controls
+
+k8s-demo-off:
+	kubectl delete -k kubernetes/demo-controls --ignore-not-found
 
 k8s-down:
 	kubectl delete namespace smart-locker

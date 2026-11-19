@@ -27,6 +27,9 @@ spec:
         prometheus.io/port: "8000"
         prometheus.io/path: /metrics
     spec:
+      # Read-only access to pods/HPA/database status for the admin dashboard
+      # (kubernetes/backend/rbac.yaml).
+      serviceAccountName: backend
       enableServiceLinks: false
       topologySpreadConstraints:
         - maxSkew: 1

@@ -1,0 +1,12 @@
+# Turns on the demo actions on the admin dashboard (start a load test, kill the
+# database primary, stop the controller, inject faults) by giving the backend
+# the extra permissions in rbac.yaml. The backend checks for them on the fly,
+# so no restart is needed either way.
+#
+#   make k8s-demo-on     # = kubectl apply -k kubernetes/demo-controls
+#   make k8s-demo-off    # = kubectl delete -k kubernetes/demo-controls
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: smart-locker
+resources:
+  - rbac.yaml

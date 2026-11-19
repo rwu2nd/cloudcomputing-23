@@ -38,6 +38,7 @@ from app import locker_controller
 from app.config import get_settings
 from app.health import router as health_router
 from app.metrics import setup_metrics
+from app.demo import router as demo_router
 from app.luggage import (
     router as luggage_router,
     store_luggage,
@@ -56,6 +57,7 @@ app = FastAPI(
 )
 app.include_router(health_router)
 app.include_router(luggage_router)
+app.include_router(demo_router)
 setup_metrics(app)
 
 
