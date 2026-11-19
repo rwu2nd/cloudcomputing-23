@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import AssignParcels from "./AssignParcels.jsx";
 
 const API = import.meta.env.VITE_API_BASE_URL ?? "/api";
 async function adminFetch(path, token, opts = {}) {
@@ -124,6 +125,10 @@ export default function AdminPanel({ accessToken, account, onLogout }) {
     return () => clearInterval(timer);
   }, [refresh]);
   const locations = snapshot?.locations ?? [];
+  const adminRequest = useCallback(
+    (path, opts) => adminFetch(path, accessToken, opts),
+    [accessToken],
+  );
   const setField = (field, value) =>
     setGroup((old) => ({ ...old, [field]: value }));
   function updateSpecial(i, field, value) {
@@ -221,6 +226,12 @@ export default function AdminPanel({ accessToken, account, onLogout }) {
           onClick={() => setView("lockers")}
         >
           Locker Status
+        </button>
+        <button
+          className={view === "parcels" ? "selected" : ""}
+          onClick={() => setView("parcels")}
+        >
+          Assign Parcels
         </button>
       </div>
       <div className="panel" style={{ marginBottom: 20 }}>
@@ -371,6 +382,11 @@ export default function AdminPanel({ accessToken, account, onLogout }) {
           </>
         )}
       </section>
+      {view === "parcels" && (
+        <section>
+          <AssignParcels request={adminRequest} />
+        </section>
+      )}
       <section style={{ display: view === "lockers" ? "block" : "none" }}>
         <div className="admin-row">
           <div>

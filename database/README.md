@@ -17,5 +17,10 @@ The **schema is not**: no tables, migrations or seed data exist yet.
 
 Whichever you pick, tell the team so Compose and Kubernetes create the same schema.
 
+## Migrations for existing databases
+`database/init/` only runs on an empty volume. If your database already exists, apply the SQL in `database/migrations/` instead of wiping the volume. The scripts are idempotent.
+- `001-assigned-parcels.sql` adds the `parcels` table, links reservations to parcels and drops the unused `unlock_password_hash` column.
+  `docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < database/migrations/001-assigned-parcels.sql`
+
 ## Changing the PostgreSQL major version
 Data files are not compatible across major versions. Dump the data (`pg_dump`), change the image tag, then restore, or wipe the volume if the data is disposable.

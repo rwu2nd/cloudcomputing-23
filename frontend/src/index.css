@@ -30,3 +30,6 @@
 
 .luggage-action-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
 @media(max-width:620px){.luggage-action-grid{grid-template-columns:1fr}}
+
+/* Success message (used by Collect Parcel and Admin > Assign Parcels) */
+.ok{padding:14px;background:#e9f9f0;color:#127a45;border-radius:10px;margin-top:14px}

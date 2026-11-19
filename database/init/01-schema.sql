@@ -39,6 +39,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_user_username_lower
     ON "user" (LOWER(username));
 
 
+-- Parcels assigned to a user by an administrator. A user may only reserve a
+-- locker for a parcel that exists here. Whether a parcel is still waiting for a
+-- locker, has a locker reserved, is ready for collection or was collected is
+-- derived from its reservation(s) in locker_reservations (see parcel_id below),
+-- so there is no separate status column to keep in sync.
+CREATE TABLE IF NOT EXISTS parcels (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL
+        REFERENCES "user"(id) ON DELETE CASCADE,
+    size TEXT NOT NULL CHECK (size IN ('S', 'M', 'L', 'XL')),
+    description TEXT NULL,
+    assigned_by UUID NULL
+        REFERENCES "user"(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_parcels_user
+    ON parcels(user_id, created_at DESC);
+
+
 
 
 
@@ -64,15 +83,28 @@ CREATE TABLE IF NOT EXISTS locker_reservations (
     compartment_id BIGINT NULL
         REFERENCES locker_compartments(id),
 
+    -- The assigned parcel this reservation is for. NULL only for legacy rows
+    -- and admin load-test reservations; every user booking sets it.
+    parcel_id UUID NULL
+        REFERENCES parcels(id),
+
     queue_order BIGINT NULL,
     queue_updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     last_attempt_at TIMESTAMPTZ NULL,
-    unlock_password_hash TEXT NULL,
     arrived_at TIMESTAMPTZ NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     allocated_at TIMESTAMPTZ NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- A parcel can have at most one non-cancelled reservation, ever: it cannot be
+-- booked twice while a locker is held, and it cannot be booked again once it
+-- has been collected (FULFILLED). A CANCELLED / UNALLOCATED reservation frees
+-- the parcel so the user can choose another locker.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_reservation_active_parcel
+    ON locker_reservations(parcel_id)
+    WHERE parcel_id IS NOT NULL
+      AND status IN ('CONDITIONAL', 'ALLOCATED', 'ARRIVED', 'FULFILLED');
+
 CREATE SEQUENCE IF NOT EXISTS public.locker_queue_order_seq
     AS BIGINT
     START WITH 1

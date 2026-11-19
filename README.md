@@ -436,7 +436,16 @@ The luggage page uses the backend API (not browser-local demo bookings). It requ
 
 The Admin dashboard is shown only after signing in with an account whose database `role` is `ADMIN`. All admin API routes validate the bearer token and database role; normal users cannot call the admin routes. Admin controls can still create real test allocations or release compartments, so use them carefully and restrict access to trusted administrators.
 
-Parcel reservations move from `CONDITIONAL` to `ALLOCATED` through the background queue worker. Once allocated, the frontend calls the arrival endpoint; the API returns the collection password once and stores only its salted password hash.
+### Parcel workflow
+
+1. **Admin assigns a parcel.** In the Admin dashboard open **Assign Parcels**, pick a user from the list (id and name come from the `user` table), choose the locker size the parcel needs and optionally add a description. This inserts a row in `parcels`.
+2. **User chooses a locker.** **Parcel → Choose locker for parcel** lists only the parcels assigned to the signed-in user. A user with no assigned parcels cannot reserve a locker. Choosing a parcel opens **Choose your locker**, where the size is fixed by the parcel and the user picks a location. The API (`POST /api/reservations` with `station_id` and `parcel_id`) rejects parcels that belong to someone else, that already have a live reservation, or that were already collected.
+3. **Allocation.** Reservations move from `CONDITIONAL` to `ALLOCATED` through the background queue worker. Once allocated, the frontend calls the arrival endpoint and the parcel becomes `ARRIVED`.
+4. **Collection.** **Parcel → Collect parcel** lists arrived parcels; selecting one and tapping **Unlock locker** unlocks it and releases the compartment. No collection password is used.
+
+If a reservation is cancelled (or an admin force-evicts it) the parcel goes back to *Awaiting locker* and the user can choose another locker for it.
+
+Databases created before this change need `database/migrations/001-assigned-parcels.sql` (see `database/README.md`).
 
 
 ## Login and default administrator

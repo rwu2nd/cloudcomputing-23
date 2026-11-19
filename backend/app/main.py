@@ -24,8 +24,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import hashlib
 import secrets
-import string
-import hmac
 from enum import Enum
 from typing import Optional
 from uuid import UUID, uuid4
@@ -132,10 +130,18 @@ class CompartmentCreate(BaseModel):
     size: Size
 
 
-# create reservation, validates incoming request
+# create reservation, validates incoming request. The locker size is NOT sent by
+# the browser: it comes from the parcel the administrator assigned to the user.
 class ReservationCreate(BaseModel):
     station_id: int = Field(gt=0)
-    required_size: Size
+    parcel_id: UUID
+
+
+# admin assigns a parcel to a user
+class ParcelAssign(BaseModel):
+    user_id: UUID
+    size: Size
+    description: Optional[str] = Field(default=None, max_length=200)
 
 # validates outgoing response
 class ReservationOut(BaseModel):
@@ -150,11 +156,6 @@ class ReservationOut(BaseModel):
     last_attempt_at: Optional[datetime] = None
     created_at: datetime
     allocated_at: Optional[datetime] = None
-
-# define password for unlocking locker, min/max length
-class UnlockRequest(BaseModel):
-    password: str = Field(min_length=1, max_length=100)
-
 
 class AdminGroup(BaseModel):
     kind: str = Field(pattern=r"^(PARCEL_COLLECT|PARCEL_RETURN|LUGGAGE)$")
@@ -310,77 +311,6 @@ def _process_if_queue_is_quiet_locked(cur) -> list[dict]:
     for station_id in quiet_station_ids:
         results.extend(_process_waiting_reservations_locked(cur, station_id))
     return results
-
-# convert generated psw into a hash and stores it instead
-def _hash_collection_password(password: str) -> str:
-    """Store a salted PBKDF2 hash instead of the plaintext password."""
-    salt = secrets.token_bytes(16)
-    iterations = 310000
-
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt,
-        iterations,
-    )
-
-    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
-
-
-def _verify_collection_password(password: str, stored_hash: str) -> bool:
-    """Verify a collection password against its stored hash."""
-    try:
-        algorithm, iterations, salt_hex, digest_hex = stored_hash.split("$")
-
-        if algorithm != "pbkdf2_sha256":
-            return False
-
-        expected = bytes.fromhex(digest_hex)
-
-        actual = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            bytes.fromhex(salt_hex),
-            int(iterations),
-        )
-
-        return hmac.compare_digest(actual, expected)
-
-    except (ValueError, TypeError):
-        return False
-
-# system generates password to unlock compartment. 
-def _generate_collection_password(cur, reservation_id: UUID):
-    """Generate a password once when a reservation first becomes ARRIVED."""
-
-    cur.execute(
-        """SELECT unlock_password_hash
-           FROM locker_reservations
-           WHERE id = %s
-           FOR UPDATE""",
-        (str(reservation_id),),
-    )
-
-    row = cur.fetchone()
-
-    if row is None:
-        raise HTTPException(status_code=404, detail="Reservation not found")
-
-    if row["unlock_password_hash"] is not None:
-        return None
-
-    alphabet = string.ascii_uppercase + string.digits
-    password = "".join(secrets.choice(alphabet) for _ in range(10))
-
-    cur.execute(
-        """UPDATE locker_reservations
-           SET unlock_password_hash = %s
-           WHERE id = %s""",
-        (_hash_collection_password(password), str(reservation_id)),
-    )
-
-    return password
-
 
 def _process_queue_once() -> int:
     """Worker entry point: acquire the shared lock and process a quiet queue."""
@@ -565,54 +495,91 @@ def list_compartments(station_id: int):
     status_code=status.HTTP_202_ACCEPTED,
     tags=["reservations"],
 )
-@app.post(
-    "/api/reservations",
-    response_model=ReservationOut,
-    status_code=status.HTTP_202_ACCEPTED,
-    tags=["reservations"],
-)
 def create_reservation(
     payload: ReservationCreate,
     user: dict = Depends(authenticated_user)
 ):
-    """Queue a parcel for the station selected by the signed-in user."""
+    """Queue an assigned parcel for the station selected by the signed-in user.
+
+    A locker can only be reserved for a parcel that an administrator has
+    assigned to this account. The locker size is taken from the parcel.
+    """
 
     customer_id = str(user["id"])
 
-    with db_connection() as conn, conn.cursor() as cur:
-        _acquire_allocation_lock(cur)
+    try:
+        with db_connection() as conn, conn.cursor() as cur:
+            _acquire_allocation_lock(cur)
 
-        cur.execute(
-            "SELECT id FROM locker WHERE id = %s AND active = TRUE",
-            (payload.station_id,),
-        )
-
-        if cur.fetchone() is None:
-            raise HTTPException(
-                status_code=422,
-                detail="Unknown or inactive selected station"
+            cur.execute(
+                "SELECT id FROM locker WHERE id = %s AND active = TRUE",
+                (payload.station_id,),
             )
 
-        cur.execute(
-            """INSERT INTO locker_reservations
-               (id, customer_id, station_id, required_size, status, queue_order,
-                queue_updated_at, created_at)
-               VALUES (
-                   gen_random_uuid(), %s, %s, %s, 'CONDITIONAL',
-                   nextval('locker_queue_order_seq'),
-                   clock_timestamp(), clock_timestamp()
-               )
-               RETURNING id""",
-            (
-                customer_id,
-                payload.station_id,
-                payload.required_size.value,
-            ),
+            if cur.fetchone() is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Unknown or inactive selected station"
+                )
+
+            # Lock the parcel row so two requests for the same parcel cannot
+            # both pass the checks below. A parcel that is not the caller's is
+            # reported as "not found" so other users' parcel ids are not leaked.
+            cur.execute(
+                "SELECT id, user_id, size FROM parcels WHERE id = %s FOR UPDATE",
+                (str(payload.parcel_id),),
+            )
+            parcel = cur.fetchone()
+            if parcel is None or str(parcel["user_id"]) != customer_id:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Parcel not found. You can only reserve a locker for a parcel assigned to your account."
+                )
+
+            cur.execute(
+                """SELECT status FROM locker_reservations
+                   WHERE parcel_id = %s
+                     AND status IN ('CONDITIONAL', 'ALLOCATED', 'ARRIVED', 'FULFILLED')""",
+                (str(payload.parcel_id),),
+            )
+            existing = cur.fetchone()
+            if existing is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This parcel has already been collected"
+                        if existing["status"] == "FULFILLED"
+                        else "A locker is already reserved for this parcel"
+                    ),
+                )
+
+            cur.execute(
+                """INSERT INTO locker_reservations
+                   (id, customer_id, station_id, required_size, status, queue_order,
+                    queue_updated_at, created_at, parcel_id)
+                   VALUES (
+                       gen_random_uuid(), %s, %s, %s, 'CONDITIONAL',
+                       nextval('locker_queue_order_seq'),
+                       clock_timestamp(), clock_timestamp(), %s
+                   )
+                   RETURNING id""",
+                (
+                    customer_id,
+                    payload.station_id,
+                    parcel["size"],
+                    str(payload.parcel_id),
+                ),
+            )
+
+            reservation_id = cur.fetchone()["id"]
+
+            return _get_reservation(cur, reservation_id)
+    except psycopg2.errors.UniqueViolation:
+        # Backstop for uq_reservation_active_parcel.
+        raise HTTPException(
+            status_code=409,
+            detail="A locker is already reserved for this parcel",
         )
-
-        reservation_id = cur.fetchone()["id"]
-
-        return _get_reservation(cur, reservation_id)
 
 
 @app.get("/api/reservations/{reservation_id}", response_model=ReservationOut, tags=["reservations"])
@@ -670,7 +637,7 @@ def process_reservations_queue():
 
 @app.post("/api/reservations/{reservation_id}/arrive", tags=["parcels"])
 def mark_reservation_arrived(reservation_id: UUID, user: dict = Depends(authenticated_user)):
-    """Mark an allocated parcel as arrived and return its one-time collection password."""
+    """Mark an allocated parcel as arrived so the user can unlock the locker."""
     with db_connection() as conn, conn.cursor() as cur:
         _acquire_allocation_lock(cur)
         reservation = _get_reservation(cur, reservation_id, lock=True)
@@ -686,13 +653,73 @@ def mark_reservation_arrived(reservation_id: UUID, user: dict = Depends(authenti
                WHERE id = %s""",
             (str(reservation_id),),
         )
-        collection_password = _generate_collection_password(cur, reservation_id)
         return {
             "reservation_id": str(reservation_id),
             "status": "ARRIVED",
-            "collection_password": collection_password,
-            "message": "Give this password to the parcel recipient. It is shown only once.",
+            "message": "Parcel has arrived. Open Collect Parcel and tap Unlock locker.",
         }
+
+
+def _parcel_state(reservation_status: Optional[str]) -> str:
+    """Derive a parcel's state from its latest non-cancelled reservation."""
+    if reservation_status is None:
+        return "AWAITING_LOCKER"
+    if reservation_status in ("CONDITIONAL", "ALLOCATED"):
+        return "LOCKER_RESERVED"
+    if reservation_status == "ARRIVED":
+        return "READY_FOR_COLLECTION"
+    return "COLLECTED"
+
+
+# parcels an administrator has assigned to the signed-in user
+@app.get("/api/parcels", tags=["parcels"])
+def list_my_parcels(user: dict = Depends(authenticated_user)):
+    """List the caller's parcels that have not been collected yet.
+
+    A parcel in state AWAITING_LOCKER is the only kind that can be used to
+    choose a locker. Cancelled reservations are ignored, so cancelling (or an
+    admin releasing) a reservation puts the parcel back in AWAITING_LOCKER.
+    """
+    with db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT p.id, p.size, p.description, p.created_at,
+                      r.id AS reservation_id,
+                      r.status AS reservation_status,
+                      s.name AS station_name,
+                      c.label AS compartment_label
+               FROM parcels p
+               LEFT JOIN LATERAL (
+                   SELECT id, status, station_id, compartment_id
+                   FROM locker_reservations
+                   WHERE parcel_id = p.id
+                     AND status IN ('CONDITIONAL', 'ALLOCATED', 'ARRIVED', 'FULFILLED')
+                   ORDER BY created_at DESC
+                   LIMIT 1
+               ) r ON TRUE
+               LEFT JOIN locker s ON s.id = r.station_id
+               LEFT JOIN locker_compartments c ON c.id = r.compartment_id
+               WHERE p.user_id = %s
+               ORDER BY p.created_at ASC, p.id ASC""",
+            (str(user["id"]),),
+        )
+        rows = cur.fetchall()
+
+    parcels = []
+    for row in rows:
+        state = _parcel_state(row["reservation_status"])
+        if state == "COLLECTED":
+            continue
+        parcels.append({
+            "id": str(row["id"]),
+            "size": row["size"],
+            "description": row["description"],
+            "created_at": row["created_at"],
+            "state": state,
+            "reservation_id": str(row["reservation_id"]) if row["reservation_id"] else None,
+            "station_name": row["station_name"],
+            "compartment_label": row["compartment_label"],
+        })
+    return parcels
 
 
 # list of parcels available for collection
@@ -724,10 +751,9 @@ def list_parcels_for_collection(user: dict = Depends(authenticated_user)):
 @app.post("/api/reservations/{reservation_id}/unlock", tags=["parcels"])
 def unlock_locker(
     reservation_id: UUID,
-    payload: UnlockRequest,
     user: dict = Depends(authenticated_user),
 ):
-    """Verify collection password and simulate locker unlocking."""
+    """Simulate unlocking the locker booked by the signed-in user."""
 
     with db_connection() as conn, conn.cursor() as cur:
         _acquire_allocation_lock(cur)
@@ -745,28 +771,6 @@ def unlock_locker(
             raise HTTPException(
                 status_code=409,
                 detail="No compartment is allocated",
-            )
-
-        cur.execute(
-            """SELECT unlock_password_hash
-               FROM locker_reservations
-               WHERE id = %s""",
-            (str(reservation_id),),
-        )
-
-        row = cur.fetchone()
-
-        if (
-            row is None
-            or row["unlock_password_hash"] is None
-            or not _verify_collection_password(
-                payload.password,
-                row["unlock_password_hash"],
-            )
-        ):
-            raise HTTPException(
-                status_code=401,
-                detail="Incorrect collection password",
             )
 
         # Simulate unlocking and release the compartment.
@@ -924,6 +928,59 @@ def admin_locker_snapshot(admin: dict = Depends(require_admin_user)):
                 "customer_id": row["customer_id"],
             })
     return {"locations": list(stations.values())}
+
+
+@app.get("/api/admin/users", tags=["admin"])
+def admin_list_users(admin: dict = Depends(require_admin_user)):
+    """List customer accounts (id and name) that parcels can be assigned to."""
+    with db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT id, username
+               FROM public."user"
+               WHERE role = 'USER'
+               ORDER BY LOWER(username), id"""
+        )
+        return [
+            {"id": str(row["id"]), "username": row["username"]}
+            for row in cur.fetchall()
+        ]
+
+
+@app.post("/api/admin/parcels", status_code=status.HTTP_201_CREATED, tags=["admin"])
+def admin_assign_parcel(payload: ParcelAssign, admin: dict = Depends(require_admin_user)):
+    """Assign an incoming parcel to a user so they can choose a locker for it."""
+    description = (payload.description or "").strip() or None
+    with db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT id, username FROM public."user"
+               WHERE id = %s AND role = 'USER'""",
+            (str(payload.user_id),),
+        )
+        customer = cur.fetchone()
+        if customer is None:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        cur.execute(
+            """INSERT INTO parcels (id, user_id, size, description, assigned_by)
+               VALUES (%s, %s, %s, %s, %s)
+               RETURNING id, user_id, size, description, created_at""",
+            (
+                str(uuid4()),
+                str(payload.user_id),
+                payload.size.value,
+                description,
+                str(admin["id"]),
+            ),
+        )
+        parcel = cur.fetchone()
+    return {
+        "id": str(parcel["id"]),
+        "user_id": str(parcel["user_id"]),
+        "username": customer["username"],
+        "size": parcel["size"],
+        "description": parcel["description"],
+        "created_at": parcel["created_at"],
+    }
 
 
 @app.delete("/api/admin/lockers/{compartment_id}/allocation", tags=["admin"])
@@ -1151,11 +1208,13 @@ def api_index():
         "docs": "/docs",
         "workflow": [
             "GET /api/stations to view availability",
-            "user selects one station",
-            "POST /api/reservations to queue a parcel at that station",
+            "admin assigns a parcel to a user: GET /api/admin/users, POST /api/admin/parcels",
+            "user lists their assigned parcels: GET /api/parcels",
+            "user selects one parcel and one station",
+            "POST /api/reservations {station_id, parcel_id} to queue that parcel at the station",
             "background worker allocates the smallest fitting compartment",
-            "POST /api/reservations/{id}/arrive returns a one-time collection password",
-            "POST /api/reservations/{id}/unlock verifies the password and releases the compartment",
+            "POST /api/reservations/{id}/arrive marks the parcel as arrived",
+            "POST /api/reservations/{id}/unlock unlocks the locker and releases the compartment",
             "POST /api/luggage/sessions stores luggage in an XL compartment for the signed-in user",
         ],
         "allocation_policy": "selected station only; smallest available compartment that fits",

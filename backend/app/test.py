@@ -14,4 +14,4 @@ def _hash_password(password: str, salt: Optional[bytes] = None) -> str:
     return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${salt.hex()}${digest.hex()}"
 
 
-print(_hash_password("Admin@12345"))
+print(_hash_password("janedoe123"))
