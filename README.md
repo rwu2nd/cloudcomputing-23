@@ -6,9 +6,18 @@ that the frontend, backend and database code plugs into. **No locker business lo
 API endpoints or database schema is included.**
 
 ```
-Browser --> frontend (nginx :80) --/api/*--> backend (FastAPI :8000) --> postgres (:5432)
-            serves the React build           /health/live, /health/ready      persistent volume
+Browser --REST--> frontend (nginx :80) --/api/*--> backend (FastAPI :8000) --gRPC--> locker-controller (:50051)
+                  serves the React build           2-6 pods (autoscaled)            simulated door hardware
+                                                        |
+                                                        +--> PgBouncer --> PostgreSQL
+                                                                           Compose: 1 container
+                                                                           Kubernetes: CloudNativePG,
+                                                                           1 primary + 2 replicas
+Prometheus scrapes the backend, the controller and the database; Grafana shows the dashboard.
 ```
+
+**[CLOUD.md](CLOUD.md)** explains which cloud-computing concepts the project shows, where they live in
+the code, and gives a step-by-step demo script with measured results.
 
 ## 1. Status at a glance
 
@@ -18,8 +27,10 @@ Browser --> frontend (nginx :80) --/api/*--> backend (FastAPI :8000) --> postgre
 | Backend | FastAPI app with `/health/live`, `/health/ready` (placeholder TCP check of the database) and a placeholder `/api/ping`. Settings read from environment variables. Dockerfile. | Real readiness check, all API endpoints, locker logic, database access layer. Delete `/api/ping` when no longer needed. |
 | Database | PostgreSQL 16 container, persistent volume, credentials from environment, health check. | The schema (tables, migrations, seed data). **Nothing is created for you.** |
 | Docker Compose | Runs all three services, waits for healthy dependencies, restarts them after a crash. | - |
-| Kubernetes | Namespace, ConfigMap, Secret template + script, PostgreSQL Deployment with a PVC, backend Deployment (**2 replicas**, readiness + liveness probes), frontend Deployment (**2 replicas**), Services. | Decide how the schema is created in Kubernetes (see `database/README.md`). |
-| Fault tolerance | Restart policies, replicas, probes, rolling updates, persistent storage (see [section 8](#8-fault-tolerance)). | Application-level resilience: real readiness check, connection retries and timeouts, 503 when the database is down. |
+| Kubernetes | Namespace, ConfigMap, Secrets from `.env`, PostgreSQL as a 3-instance CloudNativePG cluster with a PgBouncer pooler, backend Deployment autoscaled 2-6 pods (HPA), gRPC locker-controller (2 pods, headless Service), frontend (2 pods), PodDisruptionBudgets, Prometheus + Grafana, in-cluster k6 load test. | - |
+| gRPC | `proto/` contract, `locker-controller/` service, backend client with deadlines, retries, round-robin load balancing and client-side health checking (see [CLOUD.md](CLOUD.md)). | - |
+| Fault tolerance | Restart policies, replicas, probes, rolling updates, automatic database failover, graceful gRPC shutdown (see [section 8](#8-fault-tolerance)). | - |
+| CI/CD | GitHub Actions: build + test with Compose, deploy to a 3-node kind cluster and test (including a database failover), publish images to GitHub Container Registry on `main`. | - |
 
 Most of this has now been run on a real machine. **Read [Test status](#11-test-status-and-first-run-checklist) to see what is confirmed and what is not.**
 
@@ -31,27 +42,37 @@ smart-locker-system/
 ├── docker-compose.yml        # frontend + backend + PostgreSQL for local development
 ├── .env.example              # copy to .env (git-ignored) and set the database password
 ├── Makefile                  # optional shortcuts (everything is also given as plain commands)
+├── kustomization.yaml        # `kubectl apply -k .` (lives in the root so it can read database/init/ and monitoring/)
+├── CLOUD.md                  # cloud concepts, architecture and demo script
+├── proto/                    # gRPC contract (locker_controller.proto), shared by backend and controller
+├── locker-controller/        # gRPC service: simulated door hardware
+├── monitoring/               # Prometheus scrape configs + Grafana dashboard (used by Compose and Kubernetes)
+├── tests/                    # pytest API tests (test_end_to_end.py runs against Compose or Kubernetes)
+├── .github/workflows/ci.yml  # CI/CD pipeline
 ├── frontend/                 # React + Vite            -> frontend teammate
 │   ├── package.json, package-lock.json, vite.config.js, index.html
 │   └── src/                  # PLACEHOLDER page: replace
 ├── backend/                  # FastAPI                 -> backend teammate
 │   ├── requirements.txt
-│   └── app/                  # main.py, config.py, health.py (PLACEHOLDERS): replace/extend
+│   └── app/                  # main.py, luggage.py, locker_controller.py (gRPC client), metrics.py, ...
 ├── database/                 # PostgreSQL              -> database teammate
 │   ├── README.md
 │   └── init/                 # *.sql / *.sh run once on a fresh volume (Compose only)
 ├── docker/
-│   ├── backend.Dockerfile
-│   ├── frontend.Dockerfile
+│   ├── backend.Dockerfile, frontend.Dockerfile, locker-controller.Dockerfile
 │   └── nginx/default.conf.template
 └── kubernetes/
-    ├── kustomization.yaml    # `kubectl apply -k kubernetes/`
     ├── namespace.yaml, configmap.yaml
     ├── secret.yaml.example   # template only (no real values)
-    ├── create-secret.sh      # creates the Secret from your .env
-    ├── postgres/             # pvc.yaml, deployment.yaml, service.yaml
-    ├── backend/              # deployment.yaml (2 replicas + probes), service.yaml
-    └── frontend/             # deployment.yaml (2 replicas + probes), service.yaml
+    ├── create-secret.sh      # creates the Secrets from your .env
+    ├── addons/install.sh     # metrics-server + CloudNativePG operator (once per cluster)
+    ├── database/             # CloudNativePG Cluster (3 instances) + PgBouncer Pooler
+    ├── backend/              # deployment.yaml, service.yaml, hpa.yaml (2-6 pods), pdb.yaml
+    ├── locker-controller/    # deployment.yaml (gRPC probes), headless service.yaml, pdb.yaml
+    ├── frontend/             # deployment.yaml (2 replicas + probes), service.yaml, pdb.yaml
+    ├── monitoring/           # prometheus.yaml, grafana.yaml
+    ├── loadtest/             # k6 load test Job (`make k8s-loadtest`)
+    └── kind-cluster.yaml     # 3-node kind cluster (used by CI)
 ```
 
 `docker-compose.yml` sits in the repository root (the Dockerfiles are in `docker/`) so that Compose
@@ -89,16 +110,20 @@ First start takes a few minutes (it downloads base images). When it is up:
 | Backend liveness / readiness | http://localhost:8000/health/live , http://localhost:8000/health/ready |
 | Backend interactive API docs (FastAPI) | http://localhost:8000/docs |
 | PostgreSQL from your machine | `localhost:5432` (user, password and database name from `.env`) |
+| Prometheus / Grafana (only with `--profile monitoring`, see below) | http://localhost:9090 , http://localhost:3001 |
 
 Everyday commands:
 
 ```bash
 docker compose up -d --build      # start in the background (rebuilds changed images)
-docker compose ps                 # all three services should become "healthy"
+docker compose ps                 # postgres, backend, locker-controller, frontend should become "healthy"
 docker compose logs -f backend    # follow one service's logs
 docker compose up -d --build backend   # rebuild and restart only the backend
 docker compose down               # stop; database data is KEPT
 docker compose down -v            # stop AND DELETE the database volume (fresh database)
+
+docker compose --profile monitoring up -d          # also start Prometheus + Grafana
+docker compose up -d --scale locker-controller=2   # two gRPC controllers, calls are load-balanced
 ```
 
 Open a SQL shell: `docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`
@@ -128,15 +153,18 @@ Secret created from it. Compose refuses to start while `POSTGRES_PASSWORD` is em
 | `POSTGRES_DB` | postgres, backend | `.env` | ConfigMap `locker-config` |
 | `POSTGRES_USER` | postgres, backend | `.env` | Secret `locker-db-secret` |
 | `POSTGRES_PASSWORD` | postgres, backend | `.env` | Secret `locker-db-secret` |
-| `POSTGRES_HOST` = `postgres` | backend | `docker-compose.yml` | ConfigMap |
+| `POSTGRES_HOST` | backend | `docker-compose.yml` (`postgres`) | ConfigMap (`locker-db-pooler-rw`, the PgBouncer pooler) |
 | `POSTGRES_PORT` = `5432` | backend | `docker-compose.yml` | ConfigMap |
 | `APP_ENV` | backend | `.env` (default `development`) | ConfigMap |
 | `BIND_ADDRESS` (`127.0.0.1` or `0.0.0.0`) | Compose published ports of frontend and backend | `.env` | - |
 | `BACKEND_URL` = `http://backend:8000` | frontend's nginx | `docker-compose.yml` | ConfigMap |
+| `LOCKER_CONTROLLER_ADDR` | backend (gRPC client) | `docker-compose.yml` (`dns:///locker-controller:50051`) | ConfigMap (headless Service address). Unset = door unlocks simulated in-process |
+| `CONTROLLER_FAILURE_RATE`, `CONTROLLER_ACTUATION_MS` | locker-controller | `.env` (defaults 0 and 80) | env in `kubernetes/locker-controller/deployment.yaml` |
 | `VITE_API_BASE_URL` (default `/api`) | frontend build | Dockerfile build argument | - |
 
-Service names are the same in Compose and Kubernetes (`postgres`, `backend`, `frontend`), so the
-same hostnames work in both. Host ports (`FRONTEND_HOST_PORT`, `BACKEND_HOST_PORT`,
+Service names are the same in Compose and Kubernetes (`backend`, `frontend`, `locker-controller`,
+`prometheus`, `grafana`). The database is the exception: Kubernetes reaches it through the pooler
+(`locker-db-pooler-rw`) instead of `postgres`. Host ports (`FRONTEND_HOST_PORT`, `BACKEND_HOST_PORT`,
 `POSTGRES_HOST_PORT`) can be changed in `.env` if something on your laptop already uses them.
 
 **Adding a new setting for the backend**
@@ -161,6 +189,11 @@ uvicorn app.main:app --reload --port 8000
 
 (`POSTGRES_HOST` defaults to `localhost` and `POSTGRES_PORT` to `5432`. If you changed `POSTGRES_HOST_PORT`, also `export POSTGRES_PORT=<that value>`.)
 
+Without `LOCKER_CONTROLLER_ADDR` the backend simulates door unlocks in-process and logs a warning,
+so you do not need the gRPC controller for most backend work. The gRPC stubs are generated inside
+the Docker images; to use the real controller outside Docker, `pip install grpcio-tools==1.85.1`,
+run `make proto`, and start the controller with `cd locker-controller && python -m controller.server`.
+
 **Frontend** (Node 22):
 
 ```bash
@@ -173,49 +206,66 @@ Use a different backend with `VITE_DEV_PROXY_TARGET=http://host:port npm run dev
 
 ## 7. Kubernetes deployment
 
-Written for a single-laptop cluster. The images are built locally and **loaded into the cluster**;
-they are never pulled from a registry (`imagePullPolicy: IfNotPresent`, tag `:local`).
-
-**1. Start a cluster** (one of):
+Written for a laptop cluster (minikube, kind or Docker Desktop). The images are built locally and
+**loaded into the cluster**; they are never pulled from a registry (`imagePullPolicy: IfNotPresent`,
+tag `:local`). With `make` the whole thing is four commands:
 
 ```bash
+minikube start --cpus 4 --memory 6144      # or Docker Desktop's Kubernetes, or kind (see below)
+make k8s-addons                            # once per cluster: metrics-server + CloudNativePG operator
+make k8s-images                            # build the 3 images and load them into the cluster
+make k8s-up                                # create the Secrets from .env and apply everything
+```
+
+The same steps without `make`:
+
+**1. Start a cluster** (one of). Give it at least 4 CPUs and 6 GB of memory, since it runs 3 database instances.
+
+```bash
+minikube start --cpus 4 --memory 6144
+kind create cluster --name smart-locker --config kubernetes/kind-cluster.yaml   # 3 nodes
 # Docker Desktop: Settings -> Kubernetes -> Enable Kubernetes
-minikube start
-kind create cluster --name smart-locker
-kubectl get nodes        # should list one Ready node
+kubectl get nodes
 ```
 
-**2. Build the images** (Compose builds them with the exact tags the manifests use):
+**2. Install the add-ons** (once per cluster):
 
 ```bash
-docker compose build
+sh kubernetes/addons/install.sh
+# Windows without Git Bash/WSL:
+#   minikube addons enable metrics-server        (minikube)  or
+#   kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.1/components.yaml
+#   kubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.30/releases/cnpg-1.30.1.yaml
 ```
 
-**3. Make the images available to the cluster:**
+metrics-server feeds CPU usage to the autoscaler. CloudNativePG is the operator that runs
+PostgreSQL as a replicated cluster (`kubernetes/database/cluster.yaml`).
+
+**3. Build the images and make them available to the cluster:**
 
 ```bash
+docker compose build backend frontend locker-controller
+
 # minikube
 minikube image load smart-locker-backend:local
 minikube image load smart-locker-frontend:local
+minikube image load smart-locker-controller:local
 
 # kind
-kind load docker-image smart-locker-backend:local --name smart-locker
-kind load docker-image smart-locker-frontend:local --name smart-locker
+kind load docker-image smart-locker-backend:local smart-locker-frontend:local smart-locker-controller:local --name smart-locker
 
-# Docker Desktop Kubernetes: usually nothing to do (it sees your local images).
-# If pods later show ErrImagePull / ErrImageNeverPull, check which cluster type you enabled.
+# Docker Desktop Kubernetes: nothing to do (it sees your local images).
 ```
 
-The `postgres:16-alpine` image is pulled by the cluster itself.
-
-**4. Create the database Secret from your `.env`** (no credentials ever go into a manifest):
+**4. Create the database Secrets from your `.env`** (no credentials ever go into a manifest):
 
 ```bash
 sh kubernetes/create-secret.sh
-# Windows without Git Bash/WSL, do it by hand instead:
-#   kubectl apply -f kubernetes/namespace.yaml
-#   kubectl -n smart-locker create secret generic locker-db-secret --from-literal=POSTGRES_USER=<user> --from-literal=POSTGRES_PASSWORD=<password>
 ```
+
+It creates `locker-db-secret` (for the backend) and `locker-db-app` (for the database cluster).
+`POSTGRES_USER` must be `locker_user`, the owner set in `kubernetes/database/cluster.yaml`.
+Windows without Git Bash: see `kubernetes/secret.yaml.example` for the two manual commands.
 
 **5. Apply the manifests:**
 
@@ -224,36 +274,35 @@ kubectl apply -k .
 kubectl -n smart-locker get pods -w
 ```
 
-Expected when ready: `postgres` 1/1, `backend` **two** pods 1/1, `frontend` **two** pods 1/1.
-(Use `kubectl apply -k`, not `kubectl apply -f kubernetes/`: kustomize applies the namespace first.)
+Expected when ready (about 2 minutes, the database cluster starts its instances one after the other):
+`locker-db-1/2/3` (1 primary, 2 replicas), 2 `locker-db-pooler-rw`, 2 `backend`, 2 `locker-controller`,
+2 `frontend`, 1 `prometheus`, 1 `grafana`, all `1/1 Running`.
+(Use `kubectl apply -k`, not `kubectl apply -f kubernetes/`: kustomize applies things in the right order and builds the ConfigMaps.)
 
-**6. Open the app:**
+**6. Open the app and the dashboards:**
 
 ```bash
-kubectl -n smart-locker port-forward svc/frontend 8080:80     # then http://localhost:8080
-kubectl -n smart-locker port-forward svc/backend 8000:8000    # then http://localhost:8000/health/ready
+kubectl -n smart-locker port-forward svc/frontend 8080:80      # app:      http://localhost:8080
+kubectl -n smart-locker port-forward svc/grafana 3001:3000     # Grafana:  http://localhost:3001
+kubectl -n smart-locker port-forward svc/prometheus 9090:9090  # Prometheus (optional)
+kubectl -n smart-locker port-forward svc/backend 8000:8000     # API docs: http://localhost:8000/docs
 ```
 
 **Useful checks**
 
 ```bash
-kubectl -n smart-locker get deploy,pods,svc,pvc
-kubectl -n smart-locker describe pod <pod-name>
+make k8s-status                                   # pods with their node, HPA, database cluster
+kubectl -n smart-locker get hpa backend -w        # watch the autoscaler
+kubectl -n smart-locker get cluster locker-db     # database status and current primary
 kubectl -n smart-locker logs deployment/backend
 ```
 
-**Optional demo: readiness vs liveness.** Scale the database to zero:
-`kubectl -n smart-locker scale deployment/postgres --replicas=0`. The backend pods should go to
-`0/1` Ready (removed from the Service) but **not restart**, because liveness does not depend on the
-database. Scale back with `--replicas=1` and they become Ready again. The full set of failure
-demonstrations is in [section 8](#8-fault-tolerance).
+**After you change code:** `make k8s-images`, then
+`kubectl -n smart-locker rollout restart deployment/backend` (or `deployment/locker-controller`, `deployment/frontend`).
+The tag stays `:local`, so Kubernetes needs the restart to pick up the new image.
 
-**After you change code:** rebuild (`docker compose build backend`), load the image into the
-cluster again (step 3), then `kubectl -n smart-locker rollout restart deployment/backend`
-(the tag stays `:local`, so Kubernetes needs the restart to pick up the new image).
-
-**Clean up:** `kubectl delete -k kubernetes/` removes everything, **including the database data and
-the Secret**. Then `minikube delete` / `kind delete cluster --name smart-locker` if you want the cluster gone too.
+**Clean up:** `kubectl delete -k .` removes everything, **including the database data and
+the Secrets**. Then `minikube delete` / `kind delete cluster --name smart-locker` if you want the cluster gone too.
 
 ## 8. Fault tolerance
 
@@ -267,14 +316,19 @@ This was tested by hand on a local Kubernetes cluster ([cluster type]); see "Dem
 | Docker Compose | `restart: unless-stopped` on every service | A crashed container is restarted, also after a reboot |
 | Docker Compose | `depends_on` with `condition: service_healthy` | Services start in order and wait for a healthy dependency |
 | Docker Compose | Named volume `postgres_data` | Database data survives restarts and `docker compose down` |
-| Kubernetes | Backend and frontend run **2 replicas** each | One pod can fail without users noticing |
+| Kubernetes | Backend (2-6, autoscaled), frontend and locker-controller run at least **2 replicas** each, spread across nodes when there are several | One pod can fail without users noticing |
 | Kubernetes | Backend **readiness probe** (`/health/ready`) | A pod that cannot serve (e.g. database down) is taken out of the Service, not restarted |
 | Kubernetes | Backend **liveness probe** (`/health/live`) | A hung container is restarted. It does not depend on the database, so a database outage does not restart every backend pod |
 | Kubernetes | Startup probe | A slow-starting backend gets about 60 seconds before the other probes begin |
 | Kubernetes | Rolling update with `maxUnavailable: 0` | New pods become ready before old ones are removed: no downtime on deploys |
 | Kubernetes | `preStop` hook (`sleep 5`) | A pod being replaced stops receiving traffic before it shuts down |
 | Kubernetes | Deployments | Deleted or crashed pods are recreated automatically |
-| Kubernetes | PersistentVolumeClaim `postgres-data` | Database data survives pod restarts |
+| Kubernetes | CloudNativePG cluster: 1 primary + 2 streaming replicas, each with its own volume | If the primary dies a replica is promoted automatically (about 2 s of failed requests in testing) and the old primary rejoins as a replica |
+| Kubernetes | PgBouncer pooler, `server_login_retry: 1` | Backend connections survive the failover; PgBouncer reconnects to the new primary within a second |
+| Kubernetes | PodDisruptionBudgets (`minAvailable: 1`) | Node drains and cluster upgrades never take all pods of a service at once |
+| Kubernetes | Tolerations `tolerationSeconds: 30` | Pods leave a dead node after 30 s instead of the default 5 minutes |
+| Backend | Door unlocks are a gRPC call **outside** the database lock, with a 3 s deadline and retries | A slow or dead controller never blocks bookings; users get a 503 for unlocks only |
+| locker-controller | gRPC health protocol + graceful drain + `preStop` | Rolling updates of the controller drop no calls (756 of 756 succeeded in testing) |
 
 ### Demonstration
 
@@ -299,19 +353,16 @@ kubectl -n smart-locker exec deploy/frontend -- sh -c 'while true; do wget -q -T
 | 1 | A backend pod dies | `kubectl -n smart-locker delete $(kubectl -n smart-locker get pod -l app=backend -o name \| head -1)` | One pod `Terminating`, a new one starts; Terminal 2 keeps printing `OK`, no `FAIL` |
 | 2 | A container crashes | `kubectl -n smart-locker exec $(kubectl -n smart-locker get pod -l app=backend -o name \| head -1) -- sh -c 'kill 1'` | That pod's `RESTARTS` goes 0 to 1 within seconds; the other pod keeps serving |
 | 3 | Deploying a new version | `kubectl -n smart-locker rollout restart deployment/backend` | Pods replaced one at a time; no `FAIL` in Terminal 2 |
-| 4 | The database goes away | `kubectl -n smart-locker scale deployment/postgres --replicas=0` | After about 15 s backend pods show `0/1` Ready with `RESTARTS` still 0; Terminal 2 shows `FAIL` (traffic correctly refused). Then `kubectl -n smart-locker scale deployment/postgres --replicas=1`: pods return to `1/1` and Terminal 2 returns to `OK` |
-| 5 | The database restarts | List tables, delete the Postgres pod, wait, list again (below) | Both table listings are identical |
+| 4 | The database primary dies | `make k8s-failover` (deletes the current primary and watches the instances) | Within seconds another instance shows `role=primary`; the deleted one comes back as a replica. Terminal 2 keeps printing `OK` (liveness does not touch the database). `kubectl -n smart-locker get cluster locker-db` names the new primary |
+| 5 | The locker-controller goes away | `kubectl -n smart-locker scale deployment/locker-controller --replicas=0` | Unlocking a locker in the app fails after 3 s with "The locker controller is not responding"; browsing and booking still work. Scale back to 2 and unlocking works again |
+| 6 | The controller is flaky | `kubectl -n smart-locker set env deployment/locker-controller FAILURE_RATE=0.4` | Unlocks still succeed: gRPC retries absorb the injected faults (Grafana shows them). Set it back to `0` afterwards |
+| 7 | Load spike | `make k8s-loadtest`, and in another terminal `kubectl -n smart-locker get hpa backend -w` | The autoscaler goes from 2 to up to 6 backend pods, then scales back down a minute or two after the test |
 
-Demo 5 in full:
+To check the data survived demo 4, list the tables on the new primary before and after:
 
 ```bash
-kubectl -n smart-locker exec deploy/postgres -- sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\dt"'
-kubectl -n smart-locker delete pod -l app=postgres
-kubectl -n smart-locker wait --for=condition=ready pod -l app=postgres --timeout=120s
-kubectl -n smart-locker exec deploy/postgres -- sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\dt"'
+kubectl -n smart-locker exec $(kubectl -n smart-locker get cluster locker-db -o jsonpath='{.status.currentPrimary}') -c postgres -- psql -d locker_db -c '\dt'
 ```
-
-Demo 4 depends on the backend's `/health/ready` really checking the database.
 
 **Docker Compose (smaller demo)**
 
@@ -328,11 +379,10 @@ ran crash recovery from its write-ahead log (`automatic recovery in progress`), 
 
 ### Limitations
 
-- **Single PostgreSQL instance.** A database failure means a short outage until it restarts. Production setups use replication and automatic failover.
-- **Single node.** This runs on one laptop, so it cannot survive the machine itself failing.
-- **No backups yet.** The volume protects against restarts, not against deleting the claim or the namespace (`kubectl delete -k kubernetes/` removes the data). Backup with `pg_dump`:
-  `kubectl -n smart-locker exec deploy/postgres -- sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backup.sql` (run in Git Bash; PowerShell changes the file encoding).
-- **Application-level resilience belongs to the application code:** a real database check in `/health/ready` (e.g. `SELECT 1`), connection retries with timeouts, HTTP 503 instead of crashing when the database is down, and idempotent commands so retries are safe.
+- **One machine.** A laptop cluster cannot survive the laptop failing. A 3-node kind cluster (`kubernetes/kind-cluster.yaml`) shows pods and database replicas on different nodes, but they still share one computer; a real cloud cluster spreads nodes over availability zones.
+- **No off-site backups yet.** Replicas protect against an instance failing, not against deleting the namespace (`kubectl delete -k .` removes all data). Backup with `pg_dump` on the primary:
+  `kubectl -n smart-locker exec $(kubectl -n smart-locker get cluster locker-db -o jsonpath='{.status.currentPrimary}') -c postgres -- pg_dump -d locker_db > backup.sql` (run in Git Bash; PowerShell changes the file encoding). CloudNativePG can also stream backups to object storage (S3-compatible) once one is available.
+- **Monitoring data is not persistent.** Prometheus keeps metrics in an `emptyDir`, so they are lost when its pod restarts.
 - Compose has no replicas or zero-downtime updates; those come from Kubernetes.
 
 ## 9. How teammates plug in their code
@@ -359,7 +409,7 @@ ran crash recovery from its write-ahead log (`automatic recovery in progress`), 
 ### Database teammate (`database/`)
 
 1. Put schema SQL in `database/init/` (e.g. `01-schema.sql`). It runs **once**, on an empty volume. To re-run: `docker compose down -v`.
-2. Kubernetes does not mount `database/init/`. Agree with the backend teammate how the schema gets created there (migrations from the backend, or a ConfigMap mounted at `/docker-entrypoint-initdb.d`). Details in `database/README.md`.
+2. Kubernetes uses the same files: `kustomization.yaml` packs `database/init/*.sql` into the `postgres-init` ConfigMap and the CloudNativePG cluster runs them once, when it is first created (followed by `kubernetes/database/99-app-ownership.sql`, which hands the tables to `locker_user`). To re-run them, delete and recreate the cluster: `kubectl -n smart-locker delete cluster locker-db`, then `kubectl apply -k .` (this deletes the data).
 3. Tell the team if you change `POSTGRES_DB` or `POSTGRES_USER`: keep `.env.example` and `kubernetes/configmap.yaml` consistent.
 
 ## 10. Troubleshooting
@@ -386,13 +436,16 @@ ran crash recovery from its write-ahead log (`automatic recovery in progress`), 
 |---|---|
 | Pod `CreateContainerConfigError` | The Secret is missing. Run step 4, then `kubectl -n smart-locker describe pod <pod>` to confirm. |
 | `ErrImagePull` / `ImagePullBackOff` / `ErrImageNeverPull` on `smart-locker-*` | The image is not inside the cluster. Repeat step 3 for your cluster type. |
-| Backend pods stay `0/1` Ready | Readiness is failing. `kubectl -n smart-locker logs deployment/backend`, check the postgres pod is Ready, and `describe pod` for probe messages. |
-| `postgres` pod `Pending`, PVC `Pending` | No default StorageClass: `kubectl get storageclass`. minikube, kind and Docker Desktop normally have one. |
-| Changed the password but the database still uses the old one | Same rule as Compose: the data volume keeps the old password. To start fresh: `kubectl -n smart-locker scale deployment/postgres --replicas=0`, `kubectl -n smart-locker delete pvc postgres-data`, re-apply (`kubectl apply -k kubernetes/`), re-run `create-secret.sh`, scale back to 1. This deletes the data. |
+| `kubectl apply -k .` says `no matches for kind "Cluster"` / `"Pooler"` | The CloudNativePG operator is not installed. Run `make k8s-addons` (or `sh kubernetes/addons/install.sh`), then apply again. |
+| Backend pods stay `0/1` Ready | Readiness is failing. `kubectl -n smart-locker logs deployment/backend`, check `kubectl -n smart-locker get cluster locker-db` says "Cluster in healthy state", and `describe pod` for probe messages. |
+| `locker-db-*` pods or PVCs `Pending` | No default StorageClass (`kubectl get storageclass`) or not enough memory/CPU in the cluster: `kubectl -n smart-locker describe pod locker-db-1`. Give minikube `--cpus 4 --memory 6144`. |
+| `kubectl get hpa` shows `cpu: <unknown>/60%` | metrics-server is missing or still starting. `make k8s-addons`, wait a minute. |
+| Unlocking a locker returns 503 "locker controller is not responding" | The gRPC controller is down or scaled to 0: `kubectl -n smart-locker get pods -l app=locker-controller`. |
+| Changed the password but the database still uses the old one | The cluster reads the password when it is first created. To start fresh: `kubectl -n smart-locker delete cluster locker-db`, re-run `create-secret.sh`, then `kubectl apply -k .`. This deletes the data. |
 | Code changes do not appear | Rebuild, reload the image into the cluster, then `rollout restart` (see "After you change code"). |
 | `port-forward` fails: address in use | Choose another local port, e.g. `8081:80`. |
 | `unable to connect to the server` | The cluster is not running: start Docker Desktop's Kubernetes / `minikube start` / recreate the kind cluster, and check `kubectl config current-context`. |
-| Postgres pod shows `RESTARTS 1` with `Last State: Terminated`, `Reason: Unknown`, `Exit Code: 255` | Usually Docker Desktop or the Kubernetes node was restarted, or the laptop slept: not a Postgres fault (an out-of-memory kill would say `OOMKilled`, exit 137). Kubernetes restarts the container, Postgres recovers from its write-ahead log and the volume keeps the data. Check `kubectl -n smart-locker logs deploy/postgres --previous`. |
+| A `locker-db-*` pod shows `RESTARTS 1` with `Exit Code: 255` | Usually Docker Desktop or the Kubernetes node was restarted, or the laptop slept: not a Postgres fault (an out-of-memory kill would say `OOMKilled`, exit 137). If it was the primary, a replica has taken over. Check `kubectl -n smart-locker logs locker-db-1 --previous`. |
 | Deleting a pod during a failover test still breaks your requests | `kubectl port-forward` sticks to one pod. Send test traffic through the Service from inside the cluster (see section 8, Demonstration). |
 
 ## 11. Test status and first-run checklist
@@ -419,14 +472,20 @@ local Kubernetes cluster ([cluster type], 2026-11-15).
 | Loading images into the cluster | Verified for [cluster type]; the minikube and kind commands are the standard ones and not verified |
 | Failure demonstrations (section 8): pod deleted, container crashed, rolling restart, database scaled to zero and back, database pod deleted with data intact | Verified on [cluster type], 2026-11-15 |
 | Compose restart policy (`docker compose exec backend sh -c 'kill 1'`, then `docker compose ps`) | **Not yet verified** |
+| Compose with the gRPC controller and the monitoring profile: `tests/test_end_to_end.py` (parcel and luggage unlocks over gRPC, concurrency, metrics), controller stopped (unlock 503 in 3 s, booking still works, luggage claim rolled back), `--scale locker-controller=2` (calls alternate between replicas), `CONTROLLER_FAILURE_RATE=0.4` (all unlocks succeed through retries), Prometheus targets and Grafana dashboard | Verified on Docker Desktop, 2026-11-19 |
+| Kubernetes (minikube 1.39, Kubernetes 1.37, single node): add-ons script, CloudNativePG cluster + pooler, `tests/test_end_to_end.py` through the pooler, gRPC round-robin across 2 controller pods, Prometheus discovery of all pods incl. database roles, Grafana dashboard | Verified, 2026-11-19 |
+| Database failover under traffic (primary deleted): about 2 s of failed requests, then a replica is primary and the tests pass | Verified on minikube, 2026-11-19 |
+| Autoscaling: k6 job with 40 users, HPA 2 -> 4 -> 6 pods, back down after the test; 23,268 requests, 0 failures, p95 171 ms | Verified on minikube, 2026-11-19 |
+| Rolling restart of locker-controller under gRPC traffic: 0 of 756 calls failed | Verified on minikube, 2026-11-19 |
+| CI workflow (`.github/workflows/ci.yml`) | Lint-clean (actionlint). **Not yet run on GitHub**; the kind-specific steps (image loading into kind, metrics-server manifest) have not been run locally |
 
 **First-run checklist for the first teammate with Docker (about 10 minutes):**
 
 1. `cp .env.example .env`, set a password, `docker compose up --build`.
-2. `docker compose ps`: `postgres`, `backend`, `frontend` all `healthy`.
+2. `docker compose ps`: `postgres`, `backend`, `locker-controller`, `frontend` all `healthy`.
 3. http://localhost:3000 shows "Backend reachable" and "Database reachable".
 4. `docker compose down` then `up -d`: the database volume still exists (`docker volume ls` shows `smart-locker_postgres_data`).
-5. Kubernetes: follow section 7; expect 2 ready backend pods, 2 ready frontend pods and the same page via port-forward.
+5. Kubernetes: follow section 7; expect the pods listed in step 5 there and the same page via port-forward.
 6. Fix anything that differs from the above and note it here, so the README stays accurate.
 
 
@@ -450,7 +509,7 @@ Databases created before this change need `database/migrations/001-assigned-parc
 
 ## Login and default administrator
 
-The web app opens at a shared login page at `http://localhost:3000`. Sign in with either a normal user account or the seeded administrator account; the database role determines which dashboard appears. User accounts can be registered there; new registrations always receive the `USER` role. The backend creates the administrator account in `luggage_users` during schema initialisation if it does not already exist.
+The web app opens at a shared login page at `http://localhost:3000`. Sign in with either a normal user account or the seeded administrator account; the database role determines which dashboard appears. User accounts can be registered there; new registrations always receive the `USER` role. `database/init/02-seed.sql` creates the default administrator; if `ADMIN_USERNAME` names a different account, the backend creates that one on startup.
 
 - Default username: `admin`
 - Default password: `Admin@12345`
