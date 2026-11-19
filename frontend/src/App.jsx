@@ -2,6 +2,7 @@ import AdminPanel from "./AdminPanel.jsx";
 import LuggagePortal from "./LuggagePortal.jsx";
 import { useCallback, useEffect, useState } from "react";
 import "./index.css";
+import NotificationViewer from './NotificationViewer.jsx';
 
 // In Docker/Kubernetes nginx forwards /api/* to FastAPI.
 const API = import.meta.env.VITE_API_BASE_URL ?? "/api";
@@ -565,10 +566,14 @@ export default function App() {
                 sub="Store your bags in an extra-large locker."
                 onClick={() => goTo("luggage")}
               />
-            </div>
+              <SectionChoice icon="◔" title="Notifications" sub="Live gRPC notification demo." onClick={() => goTo('notifications')} />
+          </div>
           </>
         )}
 
+
+        {screen === 'notifications' && <NotificationViewer accessToken={accessToken} account={account} onBack={() => goTo('choose')} />}
+          
         {screen === "parcel" && (
           <>
             <button className="back" onClick={() => goTo("choose")}>

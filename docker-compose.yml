@@ -97,5 +97,21 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
+  notification-service:
+    build: ./notification-service
+    container_name: notification-service
+    environment:
+      GRPC_PORT: 50051
+      DB_HOST: postgres            # must match your postgres service name
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DB_NAME: ${POSTGRES_DB:-postgres}
+    ports:
+      - "50051:50051"              # optional: only needed to use grpcurl from your host
+    depends_on:
+      - postgres
+
 volumes:
   postgres_data:

@@ -1,0 +1,39 @@
+.notif-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 20px; align-items: start; }
+.notif-col { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+@media (max-width: 860px) { .notif-grid { grid-template-columns: 1fr; } }
+
+.stream-dot { font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
+.stream-dot::before { content: ''; width: 9px; height: 9px; border-radius: 50%; background: #9aa3b2; }
+.stream-dot.live::before { background: #1f9d55; }
+.stream-dot.down::before { background: #d64545; }
+.stream-dot.connecting::before { background: #d9a400; }
+
+.notif-toolbar { display: flex; align-items: center; gap: 14px; margin: 10px 0 14px; font-size: 14px; }
+.notif-toolbar button { margin-left: auto; }
+.notif-check { display: inline-flex; align-items: center; gap: 6px; }
+
+.notif-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.notif { border: 1px solid #dfe3ea; border-left-width: 4px; border-radius: 8px; padding: 12px 14px; background: #fff; }
+.notif.info { border-left-color: #3b6fd4; }
+.notif.success { border-left-color: #1f9d55; }
+.notif.warning { border-left-color: #d9a400; }
+.notif.error { border-left-color: #d64545; }
+.notif.read { opacity: 0.6; }
+.notif.flash { animation: notif-flash 1.6s ease-out; }
+@keyframes notif-flash { from { background: #e8f0ff; } to { background: #fff; } }
+@media (prefers-reduced-motion: reduce) { .notif.flash { animation: none; } }
+
+.notif-head { display: flex; justify-content: space-between; gap: 12px; }
+.notif-time { font-size: 12px; color: #6b7384; white-space: nowrap; }
+.notif p { margin: 6px 0 0; font-size: 14px; }
+.notif-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; font-size: 12px; color: #6b7384; }
+.notif-readmark { font-size: 12px; }
+
+.rpc-log { list-style: none; margin: 10px 0 0; padding: 0; max-height: 320px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.rpc-log li { display: grid; grid-template-columns: 16px auto 1fr auto; gap: 8px; padding: 5px 0; border-bottom: 1px solid #eef0f4; }
+.rpc-log .in .rpc-arrow { color: #1f9d55; }
+.rpc-log .out .rpc-arrow { color: #3b6fd4; }
+.rpc-log .err .rpc-arrow, .rpc-log .err .rpc-detail { color: #d64545; }
+.rpc-name { font-weight: 600; }
+.rpc-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rpc-ms { color: #6b7384; }

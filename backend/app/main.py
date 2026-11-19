@@ -43,6 +43,8 @@ from app.luggage import (
     authenticated_user,
 )
 
+from app import notifications_api
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -52,6 +54,7 @@ app = FastAPI(
 )
 app.include_router(health_router)
 app.include_router(luggage_router)
+app.include_router(notifications_api.router, prefix="/api")
 # All allocation-affecting API operations and worker runs use the same
 # transaction-scoped lock. PostgreSQL coordinates this across API replicas.
 ALLOCATION_LOCK_KEY = 731_904_221
