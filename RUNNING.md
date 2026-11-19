@@ -22,7 +22,7 @@ Tested on a fresh database, everything below works:
    ```
 2. **Check port 3000 is free.** If another app is using it, add this to `.env`:
    ```
-   FRONTEND_HOST_PORT=3001
+   FRONTEND_HOST_PORT=3002
    ```
 3. **Make sure `.env` exists:**
    ```bash
@@ -62,7 +62,7 @@ docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' 
 Optional extras:
 
 ```bash
-docker compose --profile monitoring up -d          # + Prometheus (:9090) and Grafana (:3001)
+docker compose --profile monitoring up -d          # + Prometheus (:9090) and Grafana (http://localhost:3000/grafana/)
 docker compose up -d --scale locker-controller=2   # two gRPC controllers, calls alternate between them
 docker compose stop locker-controller              # unlocks now fail with 503, booking still works
 ```
@@ -104,10 +104,12 @@ make k8s-images                          # build the 3 images and load them into
 make k8s-up                              # Secrets from .env, then kubectl apply -k .
 kubectl -n smart-locker get pods -w      # about 2 minutes until everything is 1/1 Running
 make k8s-app                             # http://localhost:8080
-make k8s-grafana                         # http://localhost:3001
+make k8s-demo-on                         # let the admin dashboard run the demos
 ```
 
-Demos: `make k8s-loadtest` (autoscaling), `make k8s-failover` (database failover). Without `make`, the
+Demos: open the app, sign in as admin, **Testing System**: Load Balancing, Scalability and Fault
+Tolerance have live graphs and buttons. From a terminal instead: `make k8s-loadtest` (autoscaling),
+`make k8s-failover` (database failover), `make k8s-grafana` (http://localhost:3001/grafana/). Without `make`, the
 plain commands are in README section 7. To clean up, use `kubectl delete -k .` (this also deletes the
 database data) or `make k8s-down`.
 

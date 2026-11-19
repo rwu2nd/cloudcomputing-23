@@ -110,7 +110,7 @@ First start takes a few minutes (it downloads base images). When it is up:
 | Backend liveness / readiness | http://localhost:8000/health/live , http://localhost:8000/health/ready |
 | Backend interactive API docs (FastAPI) | http://localhost:8000/docs |
 | PostgreSQL from your machine | `localhost:5432` (user, password and database name from `.env`) |
-| Prometheus / Grafana (only with `--profile monitoring`, see below) | http://localhost:9090 , http://localhost:3001 |
+| Prometheus / Grafana (only with `--profile monitoring`, see below) | http://localhost:9090 , http://localhost:3000/grafana/ (also http://localhost:3001/grafana/) |
 
 Everyday commands:
 
@@ -283,9 +283,19 @@ Expected when ready (about 2 minutes, the database cluster starts its instances 
 
 ```bash
 kubectl -n smart-locker port-forward svc/frontend 8080:80      # app:      http://localhost:8080
-kubectl -n smart-locker port-forward svc/grafana 3001:3000     # Grafana:  http://localhost:3001
+kubectl -n smart-locker port-forward svc/grafana 3001:3000     # Grafana:  http://localhost:3001/grafana/ (also /grafana/ in the app)
 kubectl -n smart-locker port-forward svc/prometheus 9090:9090  # Prometheus (optional)
 kubectl -n smart-locker port-forward svc/backend 8000:8000     # API docs: http://localhost:8000/docs
+```
+
+**7. Optional: let the admin dashboard run the demos.** The Testing System pages (Load Balancing,
+Scalability, Fault Tolerance) always show live state. Their buttons (start a load test, kill the
+database primary, stop the controller, inject faults) need extra permissions for the backend, which
+are only granted while you demo:
+
+```bash
+make k8s-demo-on      # kubectl apply -k kubernetes/demo-controls
+make k8s-demo-off     # kubectl delete -k kubernetes/demo-controls
 ```
 
 **Useful checks**

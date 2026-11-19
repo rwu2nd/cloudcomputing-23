@@ -49,6 +49,7 @@ handy for development. Kubernetes adds the replication, autoscaling and self-hea
 | Disruption budgets, spreading | PodDisruptionBudgets keep at least one pod of each service during node drains; topology spread puts replicas on different nodes | `kubernetes/*/pdb.yaml` |
 | Observability | Every pod exposes Prometheus metrics; Prometheus discovers pods through the Kubernetes API (so autoscaled pods appear automatically); Grafana shows traffic, latency, pods, gRPC calls, lockers and database roles | `backend/app/metrics.py`, `monitoring/`, `kubernetes/monitoring/` |
 | Load testing | A k6 job runs **inside** the cluster, so its traffic is spread over all backend pods | `kubernetes/loadtest/` |
+| Demo controls, least privilege | The admin dashboard's System tests read cluster state with a read-only Role; the buttons that change the cluster need a second Role that is only applied for a demo (`make k8s-demo-on`). The backend checks its own permissions with a SelfSubjectAccessReview | `backend/app/demo.py`, `kubernetes/backend/rbac.yaml`, `kubernetes/demo-controls/` |
 | CI/CD | GitHub Actions builds and tests with Compose, deploys to a throwaway 3-node kind cluster, tests again after killing the database primary, and publishes images to GitHub Container Registry from `main` | `.github/workflows/ci.yml` |
 
 ## Why gRPC, and where
@@ -89,47 +90,45 @@ Things learnt the hard way, now documented in the code:
 
 ## Demo script
 
-About 10 minutes. Set up Kubernetes first (README section 7), then open three terminals.
-
-**Terminal 1: dashboards and app**
-
-```bash
-kubectl -n smart-locker port-forward svc/grafana 3001:3000 &     # http://localhost:3001
-kubectl -n smart-locker port-forward svc/frontend 8080:80 &      # http://localhost:8080
-kubectl -n smart-locker port-forward svc/backend 8000:8000 &     # API, used below
-```
-
-**Terminal 2: watch the cluster**
+About 10 minutes, all from the app's **Admin dashboard → Testing System**. Set up Kubernetes first
+(README section 7), then:
 
 ```bash
-kubectl -n smart-locker get pods -L role -w
+make k8s-demo-on     # let the dashboard's buttons act on the cluster (demo only)
+make k8s-app         # http://localhost:8080, sign in as admin / Admin@12345
 ```
 
-**Terminal 3: run the demos**
+Each test page shows live numbers, the pods involved, and the matching Grafana graphs (Grafana is
+served by the app itself at `/grafana/`, so no extra window is needed).
 
-1. **Autoscaling.** `make k8s-loadtest` (about 4 minutes). In Grafana, watch "Backend pods" go from 2 to
-   6 and "Requests / s per backend pod" spread out. `kubectl -n smart-locker get hpa backend` shows the
-   CPU target. A minute or two after the test the pods scale back down.
-2. **gRPC load balancing.**
-   ```bash
-   TOKEN=$(curl -s -X POST localhost:8000/api/luggage/auth/login -H 'content-type: application/json' \
-     -d '{"username":"admin","password":"Admin@12345"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
-   curl -s localhost:8000/api/admin/controller -H "Authorization: Bearer $TOKEN"
-   ```
-   The six replies alternate between the two controller pods.
-3. **Retries hide a flaky dependency.** `kubectl -n smart-locker set env deployment/locker-controller FAILURE_RATE=0.4`,
-   then collect a parcel or store luggage in the app: it still works. Grafana's gRPC latency panel shows
-   the injected faults being retried. Reset with `FAILURE_RATE=0`.
-4. **Fault isolation.** `kubectl -n smart-locker scale deployment/locker-controller --replicas=0`. Browsing
-   and booking still work; unlocking shows "The locker controller is not responding" after 3 s. Scale back
-   to 2 and unlocking works again.
-5. **Database failover.** `make k8s-failover`. Terminal 2 shows another `locker-db` pod become `primary`
-   within seconds, and the deleted pod returns as a `replica`. Grafana's "PostgreSQL instances" panel
-   shows the role change. The app keeps working; in testing about 2 seconds of requests failed.
-6. **Zero-downtime deploy.** `kubectl -n smart-locker rollout restart deployment/locker-controller`
-   (or `deployment/backend`) while using the app: pods are replaced one at a time and nothing fails.
-7. **CI/CD.** Open the repository's **Actions** tab: every pull request builds the images, runs the tests
+1. **Concurrency Test.** Send more bookings than there are free lockers at once: every compartment is
+   given out exactly once, the rest wait as `CONDITIONAL`.
+2. **Load Balancing.** *Send 30 HTTP requests*: the replies come from both backend pods (Kubernetes
+   Service). *Send 30 gRPC calls*: the backend spreads them over both locker-controller pods itself
+   (round robin over a headless Service).
+3. **Scalability.** *Start load test* (40 users, 2 minutes at peak). Watch "CPU vs target" pass 60% and
+   "Backend pods" go from 2 up to 6, with the per-pod graphs spreading out. It takes a minute or two to
+   react because metrics-server samples once a minute. After the test the pods scale back down.
+4. **Fault Tolerance.**
+   - *Inject 40% faults*, then collect a parcel or store luggage in a user window: it still works,
+     because gRPC retries the failed calls. *Clear faults* afterwards.
+   - *Stop controller*: browsing and booking still work, unlocking fails after 3 s with "The locker
+     controller is not responding". *Start controller* and it works again.
+   - *Kill database primary*: the roles in "Database instances" change within seconds, a replica is
+     now primary, and the old primary comes back as a replica. About 2 s of requests fail.
+5. **Zero-downtime deploy.** `kubectl -n smart-locker rollout restart deployment/backend` while using
+   the app: pods are replaced one at a time and nothing fails.
+6. **CI/CD.** Open the repository's **Actions** tab: every pull request builds the images, runs the tests
    on Compose and on a 3-node Kubernetes cluster, and kills the database primary to prove failover.
+
+Run `make k8s-demo-off` afterwards to take the extra permissions away again. On Docker Compose the
+test pages still show the live numbers and graphs (with `--profile monitoring`), but the buttons that
+change the cluster are disabled.
+
+**Without the dashboard**, the same demos work from a terminal: `make k8s-loadtest`, `make k8s-failover`,
+`kubectl -n smart-locker scale deployment/locker-controller --replicas=0`,
+`kubectl -n smart-locker set env deployment/locker-controller FAILURE_RATE=0.4`, and Grafana via
+`make k8s-grafana` (http://localhost:3001/grafana/).
 
 ## Measured results
 
