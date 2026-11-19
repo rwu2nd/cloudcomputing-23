@@ -107,7 +107,7 @@ export default function LuggagePortal({ onBack, accessToken: token, account: use
 
   const activeSlots = slots.filter(slot => slot.size === 'XL');
 
-  return <main className="main">
+  return <main>
     <button className="back" onClick={onBack}>← Back</button>
     <div className="overline">LUGGAGE SERVICES</div>
     <h1>{view === 'choose' ? 'What would you like to do?' : view === 'store' ? 'Store luggage' : 'Retrieve luggage'}</h1>
