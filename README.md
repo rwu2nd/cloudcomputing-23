@@ -264,15 +264,15 @@ PostgreSQL as a replicated cluster (`kubernetes/database/cluster.yaml`).
 **3. Build the images and make them available to the cluster:**
 
 ```bash
-docker compose build backend frontend locker-controller
+docker compose build backend frontend locker-controller notification-service
 
 # minikube
 minikube image load smart-locker-backend:local
 minikube image load smart-locker-frontend:local
 minikube image load smart-locker-controller:local
-
+minikube image load smart-locker-notifications:local
 # kind
-kind load docker-image smart-locker-backend:local smart-locker-frontend:local smart-locker-controller:local --name smart-locker
+kind load docker-image smart-locker-backend:local smart-locker-frontend:local smart-locker-controller:local smart-locker-notifications:local --name smart-locker
 
 # Docker Desktop Kubernetes: nothing to do (it sees your local images).
 ```
